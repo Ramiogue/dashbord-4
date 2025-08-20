@@ -1,9 +1,9 @@
-import os
+# app.py — Merchant Dashboard (Device Serial login + private CSV upload)
 import math
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 import streamlit_authenticator as stauth
 
@@ -32,10 +32,9 @@ FILTER_HDR_BG_OPEN = GREEN_2    # expander header (open)
 FILTER_CNT_BG_OPEN = "#e8f5ef"  # expander content tint
 
 DANGER  = "#dc2626"      # declines
-
 NEUTRALS = ["#334155","#475569","#64748b","#94a3b8","#cbd5e1","#e2e8f0"]
 
-LOGO_URL = "https://admin.spazaeats.co.za/public/assets/img/logo.png"  # <- your logo
+LOGO_URL = "https://admin.spazaeats.co.za/public/assets/img/logo.png"
 
 def apply_plotly_layout(fig):
     fig.update_layout(
@@ -76,7 +75,6 @@ st.markdown(
       max-width:1320px; margin:0 auto;
     }}
 
-    /* Header row with logo + big title */
     .header-row {{
       display:flex; align-items:center; gap:12px; margin-bottom:.25rem;
     }}
@@ -87,7 +85,6 @@ st.markdown(
       font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px;
     }}
 
-    /* Section title with green underline */
     .section-title h2 {{
       font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px;
     }}
@@ -95,7 +92,6 @@ st.markdown(
       content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px;
     }}
 
-    /* Cards & KPIs */
     .card {{
       background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px;
       padding:12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px;
@@ -109,7 +105,6 @@ st.markdown(
     .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
     .kpi-sub   {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
 
-    /* Inputs */
     div[data-testid="stTextInput"] input,
     div[data-testid="stPassword"] input,
     div[data-baseweb="input"] input {{
@@ -120,10 +115,7 @@ st.markdown(
       border:1.5px solid {PRIMARY} !important; box-shadow:0 0 0 3px rgba(11,110,79,.10) !important;
     }}
 
-    /* Sidebar */
     [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
-
-    /* Filters expander (force green) */
     [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
     [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
       background:{FILTER_HDR_BG_DEF} !important; color:#ffffff !important; font-weight:700; padding:8px 12px; list-style:none;
@@ -149,11 +141,21 @@ st.markdown(
 # =========================
 users_cfg = st.secrets.get("users", {})
 cookie_key = st.secrets.get("COOKIE_KEY", "change-me")
+
+# You can keep this if you still show merchant names; it isn't used to filter anymore.
 MERCHANT_ID_COL = st.secrets.get("merchant_id_col", "Merchant Number - Business Name")
 
+# NEW: login key lets us filter by Device Serial (default) or fall back to merchant id
+LOGIN_KEY_COL = st.secrets.get("login_key_col", "Device Serial")
+
+# Build credentials for streamlit_authenticator
 creds = {"usernames": {}}
 for uname, u in users_cfg.items():
-    creds["usernames"][uname] = {"name": u["name"], "email": u["email"], "password": u["password_hash"]}
+    creds["usernames"][uname] = {
+        "name": u.get("name", uname),
+        "email": u.get("email", ""),
+        "password": u.get("password_hash", ""),
+    }
 
 authenticator = stauth.Authenticate(
     credentials=creds,
@@ -186,34 +188,60 @@ def get_user_record(cfg: dict, uname: str):
         if str(k).casefold() == uname_cf: return v
     return None
 
-merchant_rec = get_user_record(users_cfg, username)
-if not merchant_rec or "merchant_id" not in merchant_rec:
-    st.error("Merchant mapping not found for this user. Check Secrets for 'merchant_id'."); st.stop()
-merchant_id_value = merchant_rec["merchant_id"]
+user_rec = get_user_record(users_cfg, username)
+if not user_rec:
+    st.error("User not found in secrets."); st.stop()
+
+# Prefer device_serial; fallback to merchant_id; else username
+login_value = user_rec.get("device_serial") or user_rec.get("merchant_id") or username
 
 # =========================
-# Load & prep data
+# Data source (Upload CSV, or use bundled sample)
 # =========================
+with st.sidebar.expander("Data source", expanded=True):
+    src_opt = st.radio("Source", ["Upload CSV (private)", "Bundled sample"], index=0)
+    uploaded_file = None
+    if src_opt == "Upload CSV (private)":
+        uploaded_file = st.file_uploader("Choose transactions CSV", type=["csv"], key="tx_upload")
+
+def load_uploaded_transactions(file):
+    if not file:
+        return None
+    df = pd.read_csv(file)
+    df["__path__"] = f"uploaded:{getattr(file, 'name', 'csv')}"
+    return df
+
 @st.cache_data(ttl=60)
-def load_transactions():
+def load_bundled_transactions():
     for p in ("sample_merchant_transactions.csv", "data/sample_merchant_transactions.csv"):
         try:
             df = pd.read_csv(p); df["__path__"] = p; return df
         except Exception:
             pass
-    raise FileNotFoundError("CSV not found. Put 'sample_merchant_transactions.csv' at repo root or under 'data/'.")
+    raise FileNotFoundError("CSV not found. Upload a file, or place 'sample_merchant_transactions.csv' at repo root or in 'data/'.")
 
-tx = load_transactions()
+# Choose the source
+if src_opt == "Upload CSV (private)":
+    tx = load_uploaded_transactions(uploaded_file)
+    if tx is None:
+        st.info("Upload a CSV to proceed."); st.stop()
+else:
+    tx = load_bundled_transactions()
+
+# =========================
+# Validate & prep data
+# =========================
 required_cols = {
-    MERCHANT_ID_COL, "Transaction Date","Request Amount","Settle Amount",
-    "Auth Code","Decline Reason","Date Payment Extract",
-    "Terminal ID","Device Serial","Product Type","Issuing Bank","BIN"
+    LOGIN_KEY_COL,                      # e.g., "Device Serial"
+    "Transaction Date", "Request Amount", "Settle Amount",
+    "Auth Code", "Decline Reason", "Date Payment Extract",
+    "Terminal ID", "Device Serial", "Product Type", "Issuing Bank", "BIN"
 }
 missing = required_cols - set(tx.columns)
 if missing:
     st.error(f"Missing required column(s): {', '.join(sorted(missing))}"); st.stop()
 
-tx[MERCHANT_ID_COL] = tx[MERCHANT_ID_COL].astype(str).str.strip()
+tx[LOGIN_KEY_COL] = tx[LOGIN_KEY_COL].astype(str).str.strip()
 tx["Transaction Date"] = pd.to_datetime(tx["Transaction Date"], errors="coerce")
 tx["Request Amount"]   = pd.to_numeric(tx["Request Amount"], errors="coerce")
 tx["Settle Amount"]    = pd.to_numeric(tx["Settle Amount"], errors="coerce")
@@ -221,9 +249,10 @@ tx["Date Payment Extract"] = tx["Date Payment Extract"].fillna("").astype(str)
 for c in ["Product Type","Issuing Bank","Decline Reason","Terminal ID","Device Serial","Auth Code"]:
     tx[c] = tx[c].fillna("").astype(str)
 
-f0 = tx[tx[MERCHANT_ID_COL] == merchant_id_value].copy()
+# Filter to the logged-in device/merchant
+f0 = tx[tx[LOGIN_KEY_COL].astype(str).str.strip() == str(login_value).strip()].copy()
 if f0.empty:
-    st.warning(f"No transactions for '{merchant_id_value}' in '{MERCHANT_ID_COL}'."); st.stop()
+    st.warning(f"No transactions for '{login_value}' in '{LOGIN_KEY_COL}'."); st.stop()
 
 def approved_mask(df):
     dr = df["Decline Reason"].astype(str).str.strip()
@@ -256,7 +285,6 @@ with st.sidebar.expander("Filters", expanded=True):
     sel_issuer   = _multi("Issuing Bank",    f0["Issuing Bank"])
 
 start_date, end_date = (date_range if isinstance(date_range, tuple) else (min_d, max_d))
-
 flt = (f0["Transaction Date"].dt.date >= start_date) & (f0["Transaction Date"].dt.date <= end_date)
 flt &= f0["Decline Reason"].isin(sel_declines)
 flt &= f0["Product Type"].isin(sel_prodtype)
@@ -282,7 +310,7 @@ settled_cnt  = int(settled_rows.sum())
 aov          = safe_div(revenue, settled_cnt)
 
 # =========================
-# Header with inline logo (from URL) + title
+# Header with inline logo + title
 # =========================
 st.markdown(
     f'''
@@ -297,7 +325,7 @@ st.markdown(
 )
 
 src_path = f["__path__"].iat[0] if "__path__" in f.columns and not f.empty else "—"
-st.caption(f"Merchant: **{merchant_id_value}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
+st.caption(f"{LOGIN_KEY_COL}: **{login_value}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
 
 def kpi_card(title, value, sub=""):
     st.markdown(
@@ -439,13 +467,12 @@ for col in ["Request Amount","Settle Amount"]:
 
 st.dataframe(tbl, use_container_width=True, height=520)
 
-@st.cache_data
-def to_csv_bytes():
-    raw = f[existing_cols].sort_values("Transaction Date", ascending=False).reset_index(drop=True)
-    return raw.to_csv(index=False).encode("utf-8")
-
+# On-the-fly download (no caching, keeps it session-private)
+raw_for_download = f[existing_cols].sort_values("Transaction Date", ascending=False).reset_index(drop=True)
 st.download_button("Download filtered transactions (CSV)",
-                   data=to_csv_bytes(), file_name="filtered_transactions.csv", mime="text/csv")
+                   data=raw_for_download.to_csv(index=False).encode("utf-8"),
+                   file_name="filtered_transactions.csv",
+                   mime="text/csv")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================
