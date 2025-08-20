@@ -7,6 +7,7 @@
 # - Hide Streamlit header/toolbar
 # - Admin upload log lists ALL uploads as: Original file | Rows | Uploaded at | Saved file (no timestamp prefix in display)
 # - BUGFIX: approved_mask uses .str.startswith("00")
+# - NEW: Admin can delete uploads from the Upload Log (removes files, updates log, and rebuilds master)
 
 import os, re, math, datetime as dt
 import numpy as np
@@ -44,6 +45,15 @@ def currency_fmt(x):
 
 def section_title(txt):
     return f"""<div class="section-title"><h2>{txt}</h2></div>"""
+
+def safe_rerun():
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
 
 # =========================
 # Global CSS (also hide Streamlit header/toolbar)
@@ -223,6 +233,7 @@ if is_admin:
                     log_rows.to_csv(UPLOAD_LOG, index=False)
 
                     st.success(f"Appended {sum(rows_counts):,} rows from {len(saved_names)} file(s).")
+                    safe_rerun()
                 except Exception as e:
                     st.error(f"Failed to append/publish: {e}")
 
@@ -252,6 +263,7 @@ if is_admin:
                 # Display-friendly saved name (remove leading timestamp_)
                 def strip_ts_prefix(name):
                     return re.sub(r'^\d{8}-\d{6}_', '', str(name))
+
                 log_df["saved_display"] = log_df.get("saved_name", "").apply(strip_ts_prefix)
 
                 # Build display table
@@ -266,11 +278,97 @@ if is_admin:
                 # Sort newest first by Uploaded at (fallback to timestamp)
                 if "Uploaded at" in disp.columns and disp["Uploaded at"].notna().any():
                     disp = disp.sort_values("Uploaded at", ascending=False)
+                    log_df_sorted = log_df.sort_values("uploaded_at", ascending=False)
                 elif "timestamp" in log_df.columns:
                     disp = disp.assign(_ts=log_df["timestamp"]).sort_values("_ts", ascending=False).drop(columns=["_ts"])
+                    log_df_sorted = log_df.sort_values("timestamp", ascending=False)
+                else:
+                    log_df_sorted = log_df
 
                 st.markdown(section_title("Upload Log"), unsafe_allow_html=True)
                 st.dataframe(disp, use_container_width=True, height=280)
+
+                # ---------- NEW: Delete uploads UI ----------
+                st.markdown('<div class="card">', unsafe_allow_html=True)
+                st.markdown("**Delete uploads (removes file, updates log, and rebuilds master):**", unsafe_allow_html=True)
+
+                # Make label → saved_name + original_name mapping
+                del_labels = []
+                saved_lookup = {}
+                orig_lookup = {}
+                for _, r in log_df_sorted.iterrows():
+                    label = f"{r.get('original_name','')} | {int(r.get('rows_in_file',0))} rows | {r.get('uploaded_at','')} | {strip_ts_prefix(r.get('saved_name',''))}"
+                    key_saved = str(r.get("saved_name","")).strip()
+                    key_orig  = str(r.get("original_name","")).strip()
+                    if key_saved:
+                        del_labels.append(label)
+                        saved_lookup[label] = key_saved
+                        orig_lookup[key_saved] = key_orig
+
+                selected_labels = st.multiselect("Select upload(s) to delete", options=del_labels, default=[])
+                confirm_del = st.checkbox("I understand this will permanently remove the file(s) and rebuild the master.")
+
+                if st.button("Delete selected upload(s)", type="primary", disabled=(len(selected_labels)==0 or not confirm_del)):
+                    try:
+                        if len(selected_labels) == 0:
+                            st.warning("No uploads selected.")
+                        else:
+                            # Remove files
+                            remove_names = [saved_lookup[lbl] for lbl in selected_labels if lbl in saved_lookup]
+                            removed_any = False
+                            for s in remove_names:
+                                p = os.path.join(UPLOAD_DIR, s)
+                                if os.path.exists(p):
+                                    os.remove(p)
+                                    removed_any = True
+
+                            # Update log (drop removed)
+                            new_log = log_df[~log_df["saved_name"].isin(remove_names)].copy()
+                            new_log.to_csv(UPLOAD_LOG, index=False)
+
+                            # Rebuild master from remaining uploads
+                            os.makedirs("data", exist_ok=True)
+                            parts = []
+                            if not new_log.empty:
+                                # Only consider rows that still have corresponding files present
+                                present = []
+                                for _, r in new_log.iterrows():
+                                    sname = str(r.get("saved_name","")).strip()
+                                    opath = os.path.join(UPLOAD_DIR, sname)
+                                    if os.path.exists(opath):
+                                        present.append((opath, str(r.get("original_name","")).strip()))
+
+                                for fpath, orig_name in present:
+                                    try:
+                                        df_i = pd.read_csv(fpath)
+                                        # Tag with original upload name for traceability
+                                        df_i["__source_file__"] = orig_name if orig_name else re.sub(r'^\d{8}-\d{6}_', '', os.path.basename(fpath))
+                                        parts.append(df_i)
+                                    except Exception as e:
+                                        st.warning(f"Skipped rebuilding from '{os.path.basename(fpath)}': {e}")
+
+                            if len(parts) == 0:
+                                # No uploads remain → remove master if exists
+                                if os.path.exists(MASTER_LOCAL_PATH):
+                                    os.remove(MASTER_LOCAL_PATH)
+                                st.success("Selected uploads deleted. No uploads remain, so the master CSV was removed.")
+                            else:
+                                rebuilt = pd.concat(parts, ignore_index=True)
+                                subset = [c for c in DEDUP_CANDIDATES if c in rebuilt.columns]
+                                if subset:
+                                    rebuilt = rebuilt.drop_duplicates(subset=subset, keep="last")
+                                else:
+                                    rebuilt = rebuilt.drop_duplicates(keep="last")
+                                rebuilt.to_csv(MASTER_LOCAL_PATH, index=False)
+                                st.success(f"Deleted {len(remove_names)} upload(s) and rebuilt master from {len(parts)} remaining file(s).")
+
+                            safe_rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+
+                st.markdown('</div>', unsafe_allow_html=True)
+                # ---------- /NEW ----------
+
             except Exception as e:
                 st.warning(f"Could not render upload log: {e}")
 
