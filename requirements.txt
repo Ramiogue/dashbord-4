@@ -1,0 +1,7 @@
+streamlit>=1.31
+streamlit-authenticator>=0.4.1
+pandas>=2.1
+numpy>=1.24
+plotly>=5.22
+bcrypt>=4.1
+python-dateutil>=2.9
