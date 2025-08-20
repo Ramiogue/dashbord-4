@@ -1,5 +1,5 @@
-# app.py — Merchant Dashboard (Device Serial login + private CSV upload)
-import math
+# app.py — Merchant Dashboard (Device Serial login + ADMIN-managed master data)
+import os, math
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -14,37 +14,17 @@ st.set_page_config(page_title="Merchant Dashboard", page_icon=None, layout="wide
 # =========================
 # Brand & Theme Tokens
 # =========================
-PRIMARY = "#0B6E4F"
-GREEN_2 = "#149E67"
-TEXT    = "#0f172a"
-CARD_BG = "#ffffff"
-
-GREY_50  = "#f8fafc"
-GREY_100 = "#f1f5f9"
-GREY_200 = "#e2e8f0"
-GREY_300 = "#cbd5e1"
-GREY_400 = "#94a3b8"
-
-SIDEBAR_BG         = "#eef2f6"
-FILTER_HDR_BG_DEF  = PRIMARY
-FILTER_HDR_BG_OPEN = GREEN_2
-FILTER_CNT_BG_OPEN = "#e8f5ef"
-
-DANGER  = "#dc2626"
-NEUTRALS = ["#334155","#475569","#64748b","#94a3b8","#cbd5e1","#e2e8f0"]
-
+PRIMARY = "#0B6E4F"; GREEN_2 = "#149E67"; TEXT = "#0f172a"; CARD_BG = "#ffffff"
+GREY_50 = "#f8fafc"; GREY_100 = "#f1f5f9"; GREY_200 = "#e2e8f0"; GREY_300 = "#cbd5e1"; GREY_400 = "#94a3b8"
+SIDEBAR_BG = "#eef2f6"; FILTER_HDR_BG_DEF = PRIMARY; FILTER_HDR_BG_OPEN = GREEN_2; FILTER_CNT_BG_OPEN = "#e8f5ef"
+DANGER = "#dc2626"; NEUTRALS = ["#334155","#475569","#64748b","#94a3b8","#cbd5e1","#e2e8f0"]
 LOGO_URL = "https://admin.spazaeats.co.za/public/assets/img/logo.png"
 
 def apply_plotly_layout(fig):
-    fig.update_layout(
-        template="plotly_white",
-        margin=dict(l=10, r=10, t=46, b=10),
-        paper_bgcolor=CARD_BG,
-        plot_bgcolor=CARD_BG,
-        font=dict(color=TEXT, size=12),
-        title_x=0.01,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
+    fig.update_layout(template="plotly_white", margin=dict(l=10,r=10,t=46,b=10),
+                      paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+                      font=dict(color=TEXT, size=12), title_x=0.01,
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     fig.update_xaxes(showgrid=True, gridcolor=GREY_200, zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=GREY_200, zeroline=False)
     return fig
@@ -54,59 +34,51 @@ def currency_fmt(x):
     except Exception: return "R 0"
 
 def section_title(txt):
-    return f"""
-    <div class="section-title">
-        <h2>{txt}</h2>
-    </div>
-    """
+    return f"""<div class="section-title"><h2>{txt}</h2></div>"""
 
 # =========================
 # Global CSS
 # =========================
-st.markdown(
-    f"""
-    <style>
-    .stApp {{ background: {GREY_50}; }}
-    .block-container {{ padding-top:.8rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
-    .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
-    .header-logo img {{ display:block; height:48px; width:auto; border-radius:6px; }}
-    .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
-    .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
-    .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
-    .card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px; padding:12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
-    .kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY}; border-radius:12px; padding:10px 12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); height:84px; display:flex; flex-direction:column; justify-content:center; gap:2px; }}
-    .kpi-title {{ font-size:.72rem; color:{GREY_400}; margin:0; }}
-    .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
-    .kpi-sub   {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
-    div[data-testid="stTextInput"] input, div[data-testid="stPassword"] input, div[data-baseweb="input"] input {{
-      background:#fff !important; color:{TEXT} !important; border:1px solid {GREY_300} !important; border-radius:10px !important; padding:10px 12px !important;
-    }}
-    div[data-baseweb="input"] input:focus {{ border:1.5px solid {PRIMARY} !important; box-shadow:0 0 0 3px rgba(11,110,79,.10) !important; }}
-    [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
-    [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
-    [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{ background:{FILTER_HDR_BG_DEF} !important; color:#ffffff !important; font-weight:700; padding:8px 12px; list-style:none; }}
-    [data-testid="stSidebar"] details[open] > summary.streamlit-expanderHeader {{ background:{FILTER_HDR_BG_OPEN} !important; color:#ffffff !important; border-bottom:1px solid {GREY_200} !important; }}
-    [data-testid="stSidebar"] details[open] .streamlit-expanderContent {{ background:{FILTER_CNT_BG_OPEN} !important; padding:8px 12px !important; }}
-    [data-testid="stSidebar"] .stDateInput input {{ background:#fff !important; border:1px solid {GREY_300} !important; }}
-    .soft-divider {{ height:10px; border-radius:999px; background:{GREY_100}; border:1px solid {GREY_200}; margin:6px 0 16px 0; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(f"""
+<style>
+.stApp {{ background:{GREY_50}; }}
+.block-container {{ padding-top:.8rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
+.header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
+.header-logo img {{ height:48px; width:auto; border-radius:6px; }}
+.title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
+.section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
+.section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
+.card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px; padding:12px;
+        box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
+.kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY}; border-radius:12px;
+           padding:10px 12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); height:84px; display:flex; flex-direction:column; gap:2px; }}
+.kpi-title {{ font-size:.72rem; color:{GREY_400}; margin:0; }}
+.kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
+.kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
+[data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
+[data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
+[data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
+  background:{FILTER_HDR_BG_DEF} !important; color:#fff !important; font-weight:700; padding:8px 12px; }}
+[data-testid="stSidebar"] details[open] > summary.streamlit-expanderHeader {{
+  background:{FILTER_HDR_BG_OPEN} !important; color:#fff !important; border-bottom:1px solid {GREY_200} !important; }}
+[data-testid="stSidebar"] details[open] .streamlit-expanderContent {{ background:{FILTER_CNT_BG_OPEN} !important; padding:8px 12px !important; }}
+.soft-divider {{ height:10px; border-radius:999px; background:{GREY_100}; border:1px solid {GREY_200}; margin:6px 0 16px 0; }}
+</style>
+""", unsafe_allow_html=True)
 
 # =========================
-# Auth (from Secrets)
+# Auth & Config from Secrets
 # =========================
 users_cfg = st.secrets.get("users", {})
 cookie_key = st.secrets.get("COOKIE_KEY", "change-me")
 
-# Keep for display text if you use merchant names anywhere else
+# You can keep merchant column for labels; not used for filtering anymore
 MERCHANT_ID_COL = st.secrets.get("merchant_id_col", "Merchant Number - Business Name")
+LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")   # we filter by this (Device Serial)
+ADMIN_USERS     = set(st.secrets.get("admin_users", []))             # usernames (device serials) with admin rights
+DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()      # optional: master CSV URL (e.g., S3 presigned)
 
-# We log in & filter by this column (Device Serial by default)
-LOGIN_KEY_COL = st.secrets.get("login_key_col", "Device Serial")
-
-# Build credentials struct for streamlit_authenticator
+# Streamlit Authenticator creds
 creds = {"usernames": {}}
 for uname, u in users_cfg.items():
     creds["usernames"][uname] = {"name": u.get("name", uname),
@@ -114,10 +86,8 @@ for uname, u in users_cfg.items():
                                  "password": u.get("password_hash", "")}
 
 authenticator = stauth.Authenticate(
-    credentials=creds,
-    cookie_name="merchant_portal",
-    key=cookie_key,
-    cookie_expiry_days=7,
+    credentials=creds, cookie_name="merchant_portal",
+    key=cookie_key, cookie_expiry_days=7,
 )
 
 with st.container():
@@ -136,6 +106,7 @@ elif auth_status is None:
 
 authenticator.logout(location="sidebar")
 st.sidebar.write(f"Hello, **{name}**")
+is_admin = str(username) in ADMIN_USERS
 
 def get_user_record(cfg: dict, uname: str):
     if uname in cfg: return cfg[uname]
@@ -152,31 +123,66 @@ if not user_rec:
 login_value = user_rec.get("device_serial") or user_rec.get("merchant_id") or username
 
 # =========================
-# Data source (Upload CSV or Bundled sample)
+# ADMIN data management
 # =========================
-with st.sidebar.expander("Data source", expanded=True):
-    src_opt = st.radio("Source", ["Upload CSV (private)", "Bundled sample"], index=0)
-    uploaded_file = st.file_uploader("Choose transactions CSV", type=["csv"], key="tx_upload") \
-                    if src_opt == "Upload CSV (private)" else None
+MASTER_LOCAL_PATH = "data/master_transactions.csv"
 
-def load_uploaded_transactions(file):
-    if not file: return None
-    df = pd.read_csv(file)
-    df["__path__"] = f"uploaded:{getattr(file, 'name', 'csv')}"
+with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
+    st.caption("Admin can publish/replace the **master CSV** used for all users.")
+    if is_admin:
+        admin_upload = st.file_uploader("Upload/replace master CSV", type=["csv"], key="admin_master")
+        colA, colB = st.columns([1,1])
+        with colA:
+            if st.button("Publish master CSV", use_container_width=True, type="primary", disabled=admin_upload is None):
+                try:
+                    os.makedirs("data", exist_ok=True)
+                    with open(MASTER_LOCAL_PATH, "wb") as f:
+                        f.write(admin_upload.getbuffer())
+                    st.success(f"Published: {admin_upload.name}")
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
+        with colB:
+            if st.button("Remove local master CSV", use_container_width=True):
+                try:
+                    if os.path.exists(MASTER_LOCAL_PATH):
+                        os.remove(MASTER_LOCAL_PATH)
+                        st.success("Local master CSV removed.")
+                    else:
+                        st.info("No local master CSV found.")
+                except Exception as e:
+                    st.error(f"Failed to remove: {e}")
+    else:
+        st.info("You are not an admin. Data is loaded by the admin.")
+
+# =========================
+# Load master data (URL → local file → fallback error)
+# =========================
+def load_master_from_url(url: str):
+    df = pd.read_csv(url)
+    df["__path__"] = "remote:master"
     return df
 
-@st.cache_data(ttl=60)
-def load_bundled_transactions():
-    for p in ("sample_merchant_transactions.csv", "data/sample_merchant_transactions.csv"):
-        try:
-            df = pd.read_csv(p); df["__path__"] = p; return df
-        except Exception:
-            pass
-    raise FileNotFoundError("CSV not found. Upload a file, or place 'sample_merchant_transactions.csv' at repo root or in 'data/'.")
+def load_master_from_local(path: str):
+    if os.path.exists(path):
+        df = pd.read_csv(path); df["__path__"] = path; return df
+    return None
 
-tx = load_uploaded_transactions(uploaded_file) if src_opt == "Upload CSV (private)" else load_bundled_transactions()
+tx = None
+if DATA_MASTER_URL:
+    try:
+        tx = load_master_from_url(DATA_MASTER_URL)
+    except Exception as e:
+        st.warning(f"Could not load DATA_MASTER_URL: {e}")
+
 if tx is None:
-    st.info("Upload a CSV to proceed."); st.stop()
+    tx = load_master_from_local(MASTER_LOCAL_PATH)
+
+if tx is None:
+    if is_admin:
+        st.error("No master data found. Upload a master CSV in the Admin panel, or set DATA_MASTER_URL in Secrets.")
+    else:
+        st.error("Data not available yet. Please contact the admin.")
+    st.stop()
 
 # =========================
 # Validate & prep data
@@ -198,14 +204,14 @@ tx["Date Payment Extract"] = tx["Date Payment Extract"].fillna("").astype(str)
 for c in ["Product Type","Issuing Bank","Decline Reason","Terminal ID","Device Serial","Auth Code"]:
     tx[c] = tx[c].fillna("").astype(str)
 
-# Filter to the logged-in device/merchant
+# Filter to this user's device/merchant
 f0 = tx[tx[LOGIN_KEY_COL].astype(str).str.strip() == str(login_value).strip()].copy()
 if f0.empty:
     st.warning(f"No transactions for '{login_value}' in '{LOGIN_KEY_COL}'."); st.stop()
 
 def approved_mask(df):
     dr = df["Decline Reason"].astype(str).str.strip()
-    return dr.str.startswith("00") | (df["Auth Code"].astype(str).str.strip().ne(""))
+    return dr.startswith("00") | (df["Auth Code"].astype(str).str.strip().ne(""))
 
 def settled_mask(df):
     has_extract = df["Date Payment Extract"].astype(str).str.strip().ne("")
@@ -258,30 +264,24 @@ aov          = safe_div(revenue, settled_cnt)
 # =========================
 # Header
 # =========================
-st.markdown(
-    f'''
-    <div class="header-row">
-      <div class="header-logo"><img src="{LOGO_URL}" alt="Spaza Eats Logo"></div>
-      <div class="title-left"><h1>Merchant Dashboard</h1></div>
-    </div>
-    ''',
-    unsafe_allow_html=True
-)
+st.markdown(f'''
+<div class="header-row">
+  <div class="header-logo"><img src="{LOGO_URL}" alt="Spaza Eats Logo"></div>
+  <div class="title-left"><h1>Merchant Dashboard</h1></div>
+</div>
+''', unsafe_allow_html=True)
 
-src_path = f["__path__"].iat[0] if "__path__" in f.columns and not f.empty else "—"
+src_path = f"URL:{DATA_MASTER_URL}" if DATA_MASTER_URL else (f"file:{MASTER_LOCAL_PATH}" if os.path.exists(MASTER_LOCAL_PATH) else "—")
 st.caption(f"{LOGIN_KEY_COL}: **{login_value}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
 
 def kpi_card(title, value, sub=""):
-    st.markdown(
-        f"""
+    st.markdown(f"""
         <div class="kpi-card">
           <div class="kpi-title">{title}</div>
           <div class="kpi-value">{value}</div>
           <div class="kpi-sub">{sub}</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """, unsafe_allow_html=True)
 
 cols = st.columns(6, gap="small")
 with cols[0]: kpi_card("# Transactions", f"{transactions_cnt:,}")
@@ -301,9 +301,7 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 df_month = (
     f.loc[settled_rows, ["Transaction Date", "Settle Amount"]]
       .assign(month_start=lambda d: pd.to_datetime(d["Transaction Date"]).dt.to_period("M").dt.to_timestamp())
-      .groupby("month_start", as_index=False)
-      .agg(revenue=("Settle Amount", "sum"))
-      .sort_values("month_start")
+      .groupby("month_start", as_index=False).agg(revenue=("Settle Amount", "sum")).sort_values("month_start")
 )
 if not df_month.empty:
     full_months = pd.date_range(df_month["month_start"].min(), df_month["month_start"].max(), freq="MS")
@@ -364,8 +362,7 @@ with c2:
     base_attempts = int(len(f))
     decl_df = (f.loc[~f["is_approved"], ["Decline Reason"]]
                .value_counts().reset_index(name="count")
-               .rename(columns={"index":"Decline Reason"})
-               .sort_values("count", ascending=True))
+               .rename(columns={"index":"Decline Reason"}).sort_values("count", ascending=True))
     if not decl_df.empty and base_attempts > 0:
         decl_df["pct_of_attempts"] = decl_df["count"] / base_attempts
         fig_decl = px.bar(decl_df, x="pct_of_attempts", y="Decline Reason", orientation="h")
@@ -399,12 +396,10 @@ for col in ["Request Amount","Settle Amount"]:
         tbl[col] = tbl[col].apply(lambda v: f"R {v:,.2f}" if pd.notnull(v) else "")
 st.dataframe(tbl, use_container_width=True, height=520)
 
-# Download (session-only)
 raw_for_download = f[existing_cols].sort_values("Transaction Date", ascending=False).reset_index(drop=True)
 st.download_button("Download filtered transactions (CSV)",
                    data=raw_for_download.to_csv(index=False).encode("utf-8"),
-                   file_name="filtered_transactions.csv",
-                   mime="text/csv")
+                   file_name="filtered_transactions.csv", mime="text/csv")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================
