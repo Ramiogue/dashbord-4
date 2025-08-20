@@ -1,6 +1,6 @@
 # app.py — Merchant Dashboard
 # - Login by Device Serial (from Secrets)
-# - Admin uploads master CSV or sets DATA_MASTER_URL
+# - Admin uploads 1..N CSVs (replace OR append/merge with dedupe) or sets DATA_MASTER_URL
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
 # - BUGFIX: approved_mask uses .str.startswith("00")
@@ -122,24 +122,66 @@ if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
 
 # =========================
-# ADMIN data management
+# ADMIN data management (multi-file, replace OR append/merge)
 # =========================
 MASTER_LOCAL_PATH = "data/master_transactions.csv"
 
 with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
     st.caption("Admin can publish/replace the **master CSV** used for all users.")
     if is_admin:
-        admin_upload = st.file_uploader("Upload/replace master CSV", type=["csv"], key="admin_master")
+        admin_uploads = st.file_uploader(
+            "Upload one or more CSV files",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="admin_master_multi",
+        )
+
+        mode = st.radio(
+            "When publishing…",
+            ["Replace existing master with these", "Append/merge with existing master"],
+            index=0,
+        )
+
+        # Columns often good for de-duplication; only existing columns are used
+        DEDUP_CANDIDATES = [
+            "Device Serial", "Transaction Date", "Request Amount", "Settle Amount",
+            "Auth Code", "System Trace Audit Number", "Online Reference Number",
+            "Retrieval Reference", "UTI"
+        ]
+        do_dedup = st.checkbox("Deduplicate after combine", value=True)
+
         colA, colB = st.columns([1,1])
         with colA:
-            if st.button("Publish master CSV", use_container_width=True, type="primary", disabled=admin_upload is None):
+            if st.button("Publish master CSV", use_container_width=True, type="primary", disabled=not admin_uploads):
                 try:
+                    import pandas as _pd
+                    # Read all uploaded files
+                    new_dfs = []
+                    for f in admin_uploads:
+                        df_i = _pd.read_csv(f)
+                        new_dfs.append(df_i)
+                    df_new = _pd.concat(new_dfs, ignore_index=True)
+
+                    # Append to existing if requested
+                    if mode == "Append/merge with existing master" and os.path.exists(MASTER_LOCAL_PATH):
+                        df_base = _pd.read_csv(MASTER_LOCAL_PATH)
+                        df_out = _pd.concat([df_base, df_new], ignore_index=True)
+                    else:
+                        df_out = df_new
+
+                    # Optional de-dup
+                    if do_dedup:
+                        subset = [c for c in DEDUP_CANDIDATES if c in df_out.columns]
+                        if subset:
+                            df_out = df_out.drop_duplicates(subset=subset, keep="last")
+                        else:
+                            df_out = df_out.drop_duplicates(keep="last")
+
                     os.makedirs("data", exist_ok=True)
-                    with open(MASTER_LOCAL_PATH, "wb") as f:
-                        f.write(admin_upload.getbuffer())
-                    st.success(f"Published: {getattr(admin_upload, 'name', 'CSV')}")
+                    df_out.to_csv(MASTER_LOCAL_PATH, index=False)
+                    st.success(f"Published master CSV with {len(df_out):,} rows.")
                 except Exception as e:
-                    st.error(f"Failed to save: {e}")
+                    st.error(f"Failed to publish: {e}")
         with colB:
             if st.button("Remove local master CSV", use_container_width=True):
                 try:
@@ -178,7 +220,7 @@ if tx is None:
 
 if tx is None:
     if is_admin:
-        st.error("No master data found. Upload a master CSV in the Admin panel, or set DATA_MASTER_URL in Secrets.")
+        st.error("No master data found. Upload CSV(s) in the Admin panel, or set DATA_MASTER_URL in Secrets.")
     else:
         st.error("Data not available yet. Please contact the admin.")
     st.stop()
@@ -384,10 +426,13 @@ with c2:
     st.markdown(section_title("Top Decline Reasons"), unsafe_allow_html=True)
     st.markdown('<div class="card">', unsafe_allow_html=True)
     base_attempts = int(len(f))
-    decl_df = (f.loc[~f["is_approved"], ["Decline Reason"]]
-               .value_counts().reset_index(name="count")
-               .rename(columns={"index":"Decline Reason"})
-               .sort_values("count", ascending=True))
+    decl_df = (
+        f.loc[~f["is_approved"], "Decline Reason"]
+         .value_counts()
+         .rename_axis("Decline Reason")
+         .reset_index(name="count")
+         .sort_values("count", ascending=True)
+    )
     if not decl_df.empty and base_attempts > 0:
         decl_df["pct_of_attempts"] = decl_df["count"] / base_attempts
         fig_decl = px.bar(decl_df, x="pct_of_attempts", y="Decline Reason", orientation="h")
