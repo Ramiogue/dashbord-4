@@ -1,4 +1,10 @@
-# app.py — Merchant Dashboard (Device Serial login + ADMIN-managed master data)
+# app.py — Merchant Dashboard
+# - Login by Device Serial (from Secrets)
+# - Admin uploads master CSV or sets DATA_MASTER_URL
+# - Admin can view all merchants or choose a device
+# - Merchants see only their own device
+# - BUGFIX: approved_mask uses .str.startswith("00")
+
 import os, math
 import numpy as np
 import pandas as pd
@@ -48,10 +54,8 @@ st.markdown(f"""
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
 .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
-.card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px; padding:12px;
-        box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
-.kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY}; border-radius:12px;
-           padding:10px 12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); height:84px; display:flex; flex-direction:column; gap:2px; }}
+.card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px; padding:12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
+.kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY}; border-radius:12px; padding:10px 12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); height:84px; display:flex; flex-direction:column; gap:2px; }}
 .kpi-title {{ font-size:.72rem; color:{GREY_400}; margin:0; }}
 .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
 .kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
@@ -71,14 +75,12 @@ st.markdown(f"""
 # =========================
 users_cfg = st.secrets.get("users", {})
 cookie_key = st.secrets.get("COOKIE_KEY", "change-me")
-
-# You can keep merchant column for labels; not used for filtering anymore
 MERCHANT_ID_COL = st.secrets.get("merchant_id_col", "Merchant Number - Business Name")
-LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")   # we filter by this (Device Serial)
-ADMIN_USERS     = set(st.secrets.get("admin_users", []))             # usernames (device serials) with admin rights
-DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()      # optional: master CSV URL (e.g., S3 presigned)
+LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")
+ADMIN_USERS     = set(st.secrets.get("admin_users", []))
+DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()
 
-# Streamlit Authenticator creds
+# Build credentials for streamlit_authenticator
 creds = {"usernames": {}}
 for uname, u in users_cfg.items():
     creds["usernames"][uname] = {"name": u.get("name", uname),
@@ -116,11 +118,8 @@ def get_user_record(cfg: dict, uname: str):
     return None
 
 user_rec = get_user_record(users_cfg, username)
-if not user_rec:
+if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
-
-# Prefer device_serial; fallback to merchant_id; else username
-login_value = user_rec.get("device_serial") or user_rec.get("merchant_id") or username
 
 # =========================
 # ADMIN data management
@@ -138,7 +137,7 @@ with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
                     os.makedirs("data", exist_ok=True)
                     with open(MASTER_LOCAL_PATH, "wb") as f:
                         f.write(admin_upload.getbuffer())
-                    st.success(f"Published: {admin_upload.name}")
+                    st.success(f"Published: {getattr(admin_upload, 'name', 'CSV')}")
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
         with colB:
@@ -155,7 +154,7 @@ with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
         st.info("You are not an admin. Data is loaded by the admin.")
 
 # =========================
-# Load master data (URL → local file → fallback error)
+# Load master data (URL → local file → error)
 # =========================
 def load_master_from_url(url: str):
     df = pd.read_csv(url)
@@ -192,9 +191,9 @@ required_cols = {
     "Auth Code","Decline Reason","Date Payment Extract",
     "Terminal ID","Device Serial","Product Type","Issuing Bank","BIN"
 }
-missing = required_cols - set(tx.columns)
+missing = sorted(required_cols - set(tx.columns))
 if missing:
-    st.error(f"Missing required column(s): {', '.join(sorted(missing))}"); st.stop()
+    st.error(f"Missing required column(s): {', '.join(missing)}"); st.stop()
 
 tx[LOGIN_KEY_COL] = tx[LOGIN_KEY_COL].astype(str).str.strip()
 tx["Transaction Date"] = pd.to_datetime(tx["Transaction Date"], errors="coerce")
@@ -204,14 +203,39 @@ tx["Date Payment Extract"] = tx["Date Payment Extract"].fillna("").astype(str)
 for c in ["Product Type","Issuing Bank","Decline Reason","Terminal ID","Device Serial","Auth Code"]:
     tx[c] = tx[c].fillna("").astype(str)
 
-# Filter to this user's device/merchant
-f0 = tx[tx[LOGIN_KEY_COL].astype(str).str.strip() == str(login_value).strip()].copy()
-if f0.empty:
-    st.warning(f"No transactions for '{login_value}' in '{LOGIN_KEY_COL}'."); st.stop()
+# =========================
+# Choose scope (admin) or enforce device (merchant)
+# =========================
+login_value = None if is_admin else (user_rec.get("device_serial") or user_rec.get("merchant_id"))
 
+if is_admin:
+    with st.sidebar.expander("Admin view", expanded=True):
+        admin_scope = st.radio("Scope", ["All merchants", "Choose device"], index=1)
+        if admin_scope == "All merchants":
+            f0 = tx.copy()
+            effective_label = "All merchants"
+        else:
+            devices = sorted(d for d in tx[LOGIN_KEY_COL].astype(str).str.strip().unique() if d and d.lower() != "nan")
+            selected = st.selectbox("Device Serial", devices)
+            f0 = tx[tx[LOGIN_KEY_COL].astype(str).str.strip() == str(selected).strip()].copy()
+            effective_label = selected
+else:
+    if not login_value:
+        st.error("Your account is not linked to a device. Contact the admin."); st.stop()
+    f0 = tx[tx[LOGIN_KEY_COL].astype(str).str.strip() == str(login_value).strip()].copy()
+    effective_label = login_value
+
+if f0.empty:
+    st.warning(f"No transactions for '{effective_label}' in '{LOGIN_KEY_COL}'."); st.stop()
+
+# =========================
+# Flags
+# =========================
 def approved_mask(df):
+    # FIX: use .str.startswith for a Series
     dr = df["Decline Reason"].astype(str).str.strip()
-    return dr.startswith("00") | (df["Auth Code"].astype(str).str.strip().ne(""))
+    auth = df["Auth Code"].astype(str).str.strip()
+    return dr.str.startswith("00") | auth.ne("")
 
 def settled_mask(df):
     has_extract = df["Date Payment Extract"].astype(str).str.strip().ne("")
@@ -272,7 +296,7 @@ st.markdown(f'''
 ''', unsafe_allow_html=True)
 
 src_path = f"URL:{DATA_MASTER_URL}" if DATA_MASTER_URL else (f"file:{MASTER_LOCAL_PATH}" if os.path.exists(MASTER_LOCAL_PATH) else "—")
-st.caption(f"{LOGIN_KEY_COL}: **{login_value}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
+st.caption(f"{LOGIN_KEY_COL}: **{effective_label}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
 
 def kpi_card(title, value, sub=""):
     st.markdown(f"""
@@ -313,7 +337,7 @@ if not df_month.empty:
     fig_m.update_layout(title_text="Revenue per Month (Line)")
     fig_m.update_traces(hovertemplate="<b>%{x|%b %Y}</b><br>Revenue: R %{y:,.0f}<extra></extra>")
     apply_plotly_layout(fig_m)
-    st.plotly_chart(fig_m, use_container_width=True, height=360)
+    st.plotly_chart(fig_m, use_container_width=True)
 else:
     st.info("No settled revenue in the selected period.")
 st.markdown('</div>', unsafe_allow_html=True)
@@ -331,7 +355,7 @@ if not prod_pie.empty:
                              marker=dict(line=dict(color="#ffffff", width=1)))
     fig_pie_pt.update_layout(title_text="Revenue by Product Type", colorway=NEUTRALS)
     apply_plotly_layout(fig_pie_pt)
-    st.plotly_chart(fig_pie_pt, use_container_width=True, height=420)
+    st.plotly_chart(fig_pie_pt, use_container_width=True)
 else:
     st.info("No settled revenue in the selected period.")
 st.markdown('</div>', unsafe_allow_html=True)
@@ -351,7 +375,7 @@ with c1:
         fig_bank.update_layout(title_text="Top 10 Issuers (Revenue)")
         fig_bank.update_traces(hovertemplate="%{y}<br>Revenue: R %{x:,.0f}<extra></extra>")
         apply_plotly_layout(fig_bank)
-        st.plotly_chart(fig_bank, use_container_width=True, height=420)
+        st.plotly_chart(fig_bank, use_container_width=True)
     else:
         st.info("No revenue in range.")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -362,7 +386,8 @@ with c2:
     base_attempts = int(len(f))
     decl_df = (f.loc[~f["is_approved"], ["Decline Reason"]]
                .value_counts().reset_index(name="count")
-               .rename(columns={"index":"Decline Reason"}).sort_values("count", ascending=True))
+               .rename(columns={"index":"Decline Reason"})
+               .sort_values("count", ascending=True))
     if not decl_df.empty and base_attempts > 0:
         decl_df["pct_of_attempts"] = decl_df["count"] / base_attempts
         fig_decl = px.bar(decl_df, x="pct_of_attempts", y="Decline Reason", orientation="h")
@@ -372,7 +397,7 @@ with c2:
         fig_decl.update_layout(title_text="As % of All Attempts")
         fig_decl.update_traces(hovertemplate="%{y}<br>% of Attempts: %{x:.1%}<extra></extra>")
         apply_plotly_layout(fig_decl)
-        st.plotly_chart(fig_decl, use_container_width=True, height=420)
+        st.plotly_chart(fig_decl, use_container_width=True)
     else:
         st.info("No declines in the selected period.")
     st.markdown('</div>', unsafe_allow_html=True)
