@@ -1,11 +1,12 @@
 # app.py — Merchant Dashboard
 # - Login by Device Serial (from Secrets)
 # - Admin uploads 1..N CSVs -> APPEND/MERGE into master with dedupe
-# - Every uploaded file is saved under data/uploads/ and rows get __source_file__ column
+# - Each upload is saved under data/uploads/; rows are tagged with __source_file__
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
+# - Hide Streamlit header/toolbar
+# - Admin upload log lists ALL uploads as: Original file | Rows | Uploaded at | Saved file (no timestamp prefix in display)
 # - BUGFIX: approved_mask uses .str.startswith("00")
-# - Hide Streamlit header/toolbar for a cleaner top area
 
 import os, re, math, datetime as dt
 import numpy as np
@@ -45,15 +46,14 @@ def section_title(txt):
     return f"""<div class="section-title"><h2>{txt}</h2></div>"""
 
 # =========================
-# Global CSS (incl. hide Streamlit header/toolbar)
+# Global CSS (also hide Streamlit header/toolbar)
 # =========================
 st.markdown(f"""
 <style>
-/* App background + container width/padding */
 .stApp {{ background:{GREY_50}; }}
 .block-container {{ padding-top:.4rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
 
-/* Hide Streamlit chrome (top bar / header / menu / footer) */
+/* Hide Streamlit chrome */
 header[data-testid="stHeader"] {{ display:none; }}
 div[data-testid="stToolbar"] {{ display:none; }}
 #MainMenu {{ visibility:hidden; }}
@@ -78,7 +78,7 @@ footer {{ visibility:hidden; }}
 .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
 .kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
 
-/* Sidebar look */
+/* Sidebar */
 [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
 [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
 [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
@@ -152,12 +152,13 @@ UPLOAD_LOG = "data/upload_log.csv"
 
 if is_admin:
     with st.sidebar.expander("Admin: Data Management", expanded=True):
-        st.caption("Upload CSVs to **append/merge** into the master. Each file is saved and rows get a `__source_file__` column.")
+        # (Removed faded captions/instructions)
         admin_uploads = st.file_uploader(
             "Upload one or more CSV files (they will be appended to the master)",
             type=["csv"], accept_multiple_files=True, key="admin_master_multi",
         )
 
+        # De-dup columns; only existing ones will be used
         DEDUP_CANDIDATES = [
             "Device Serial", "Transaction Date", "Request Amount", "Settle Amount",
             "Auth Code", "System Trace Audit Number", "Online Reference Number",
@@ -177,7 +178,10 @@ if is_admin:
 
                     # Read, save, tag each new file
                     new_parts, saved_names, orig_names, rows_counts = [], [], [], []
-                    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                    now = dt.datetime.now()
+                    ts = now.strftime("%Y%m%d-%H%M%S")
+                    uploaded_at = now.strftime("%Y-%m-%d %H:%M:%S")
+
                     for f in admin_uploads:
                         orig = f.name or "uploaded.csv"
                         safe = re.sub(r'[^A-Za-z0-9._-]+', '_', orig)
@@ -188,7 +192,7 @@ if is_admin:
                         orig_names.append(orig)
 
                         df_i = pd.read_csv(dest)
-                        df_i["__source_file__"] = orig  # keep original uploaded name
+                        df_i["__source_file__"] = orig  # track original upload name
                         new_parts.append(df_i)
                         rows_counts.append(len(df_i))
 
@@ -205,12 +209,13 @@ if is_admin:
 
                     df_out.to_csv(MASTER_LOCAL_PATH, index=False)
 
-                    # Update upload log
+                    # Update/upload log (store both timestamp & human time)
                     log_rows = pd.DataFrame({
                         "timestamp": [ts]*len(saved_names),
-                        "saved_name": saved_names,
+                        "uploaded_at": [uploaded_at]*len(saved_names),
                         "original_name": orig_names,
                         "rows_in_file": rows_counts,
+                        "saved_name": saved_names,
                     })
                     if os.path.exists(UPLOAD_LOG):
                         old = pd.read_csv(UPLOAD_LOG)
@@ -218,9 +223,6 @@ if is_admin:
                     log_rows.to_csv(UPLOAD_LOG, index=False)
 
                     st.success(f"Appended {sum(rows_counts):,} rows from {len(saved_names)} file(s).")
-                    st.write("Saved files:")
-                    for nm in saved_names:
-                        st.write(f"- `{nm}`")
                 except Exception as e:
                     st.error(f"Failed to append/publish: {e}")
 
@@ -235,14 +237,42 @@ if is_admin:
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
 
-        # Show upload log
+        # Upload Log (ALL uploads; order: Original | Rows | Uploaded at | Saved file)
         if os.path.exists(UPLOAD_LOG):
-            st.caption("Recent uploads:")
             try:
-                log_df = pd.read_csv(UPLOAD_LOG).sort_values(["timestamp","saved_name"], ascending=[False, True]).head(50)
-                st.dataframe(log_df, use_container_width=True, height=220)
-            except Exception:
-                pass
+                log_df = pd.read_csv(UPLOAD_LOG)
+
+                # Backfill uploaded_at if missing (older entries)
+                if "uploaded_at" not in log_df.columns and "timestamp" in log_df.columns:
+                    def ts_to_human(x):
+                        try: return dt.datetime.strptime(str(x), "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception: return ""
+                    log_df["uploaded_at"] = log_df["timestamp"].apply(ts_to_human)
+
+                # Display-friendly saved name (remove leading timestamp_)
+                def strip_ts_prefix(name):
+                    return re.sub(r'^\d{8}-\d{6}_', '', str(name))
+                log_df["saved_display"] = log_df.get("saved_name", "").apply(strip_ts_prefix)
+
+                # Build display table
+                disp = log_df[["original_name", "rows_in_file", "uploaded_at", "saved_display"]].copy()
+                disp = disp.rename(columns={
+                    "original_name": "Original file",
+                    "rows_in_file": "Rows",
+                    "uploaded_at": "Uploaded at",
+                    "saved_display": "Saved file",
+                })
+
+                # Sort newest first by Uploaded at (fallback to timestamp)
+                if "Uploaded at" in disp.columns and disp["Uploaded at"].notna().any():
+                    disp = disp.sort_values("Uploaded at", ascending=False)
+                elif "timestamp" in log_df.columns:
+                    disp = disp.assign(_ts=log_df["timestamp"]).sort_values("_ts", ascending=False).drop(columns=["_ts"])
+
+                st.markdown(section_title("Upload Log"), unsafe_allow_html=True)
+                st.dataframe(disp, use_container_width=True, height=280)
+            except Exception as e:
+                st.warning(f"Could not render upload log: {e}")
 
 # =========================
 # Load master data (URL → local file → error)
