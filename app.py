@@ -1,12 +1,12 @@
 # app.py — Merchant Dashboard
 # - Login by Device Serial (from Secrets)
 # - Admin uploads 1..N CSVs -> APPEND/MERGE into master with dedupe
-# - Each upload is saved under data/uploads/ (kept as original filename; overwrite on same-name)
+# - Each upload is saved under data/uploads/ as the ORIGINAL filename (overwrite on same-name)
 # - Rows are tagged with __source_file__ (original upload name)
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
 # - Hide Streamlit header/toolbar
-# - Upload Log shows: Original file | Rows | Uploaded at | Saved file (+ Delete column after Saved file)
+# - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete (Delete column appears after Saved file)
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
 import os, re, math, datetime as dt
@@ -53,7 +53,7 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Global CSS (hide Streamlit chrome + keep controls on one line)
+# Global CSS (hide chrome + make buttons fill/wrap within their boxes)
 # =========================
 st.markdown(f"""
 <style>
@@ -66,8 +66,12 @@ div[data-testid="stToolbar"] {{ display:none; }}
 #MainMenu {{ visibility:hidden; }}
 footer {{ visibility:hidden; }}
 
-/* Keep buttons from wrapping text onto multiple lines */
-.stButton > button {{ white-space: nowrap; }}
+/* Buttons: fill width and wrap text so they move with their container */
+.stButton > button, .stDownloadButton > button {{
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}}
 
 /* Header row with logo + title */
 .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
@@ -111,11 +115,9 @@ LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")
 ADMIN_USERS     = set(st.secrets.get("admin_users", []))
 DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()
 
-# Upload behavior controls
-# - Keep original filename in uploads (no timestamp)
-# - Overwrite same-name file if it already exists
-UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # default False per your request
-UPLOAD_OVERWRITE        = bool(st.secrets.get("UPLOAD_OVERWRITE", True))           # default True per your request
+# Upload behavior controls (override via Secrets if you ever want timestamps or no-overwrite)
+UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # default False: keep original filename
+UPLOAD_OVERWRITE        = bool(st.secrets.get("UPLOAD_OVERWRITE", True))           # default True: overwrite same-name
 
 # Build credentials for streamlit_authenticator
 creds = {"usernames": {}}
@@ -213,7 +215,7 @@ if is_admin:
                             dest_name = f"{base}({k}){ext}"
                             dest_path = os.path.join(UPLOAD_DIR, dest_name)
 
-                        # Save (overwrite if same-name and policy allows)
+                        # Save file (overwrite if allowed)
                         with open(dest_path, "wb") as out:
                             out.write(f.getbuffer())
 
@@ -221,7 +223,7 @@ if is_admin:
                         orig_names.append(orig)
 
                         df_i = pd.read_csv(dest_path)
-                        df_i["__source_file__"] = orig  # track original upload name as given by user
+                        df_i["__source_file__"] = orig  # track original upload name
                         new_parts.append(df_i)
                         rows_counts.append(len(df_i))
 
@@ -238,7 +240,7 @@ if is_admin:
 
                     df_out.to_csv(MASTER_LOCAL_PATH, index=False)
 
-                    # Update upload log (store both timestamp and human time)
+                    # Update upload log
                     log_rows = pd.DataFrame({
                         "timestamp": [ts]*len(saved_names),
                         "uploaded_at": [uploaded_at]*len(saved_names),
@@ -267,7 +269,7 @@ if is_admin:
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
 
-        # ===== Upload Log with in-table Delete =====
+        # ===== Upload Log with in-table Delete (table + controls inside one card) =====
         if os.path.exists(UPLOAD_LOG):
             try:
                 log_df = pd.read_csv(UPLOAD_LOG)
@@ -279,7 +281,7 @@ if is_admin:
                         except Exception: return ""
                     log_df["uploaded_at"] = log_df["timestamp"].apply(ts_to_human)
 
-                # Remove leading timestamp_ in display (works whether or not we use timestamps)
+                # Strip leading timestamp_ in display (works whether or not timestamps are used)
                 def strip_ts_prefix(name): return re.sub(r'^\d{8}-\d{6}_', '', str(name))
 
                 display = log_df.copy()
@@ -296,18 +298,21 @@ if is_admin:
                 elif "timestamp" in display.columns:
                     display = display.sort_values("timestamp", ascending=False)
 
-                # Use saved_name as index to reliably know which file to delete
+                # Use saved_name as index to reliably identify rows
                 display = display.set_index("saved_name", drop=False)
 
+                # Show only the four columns + a Delete checkbox column
                 editor_view = display[["Original file", "Rows", "Uploaded at", "Saved file"]].copy()
                 editor_view["Delete"] = False
 
                 st.markdown(section_title("Upload Log"), unsafe_allow_html=True)
+                st.markdown('<div class="card">', unsafe_allow_html=True)
+
                 edited = st.data_editor(
                     editor_view,
                     key="upload_log_editor",
                     use_container_width=True,
-                    height=320,
+                    height=340,
                     hide_index=True,
                     num_rows="fixed",
                     disabled=["Original file", "Rows", "Uploaded at", "Saved file"],
@@ -318,21 +323,22 @@ if is_admin:
                     },
                 )
 
-                # Collect which saved_name(s) are marked for deletion
+                # Which saved_name(s) are marked for deletion?
                 to_delete_saved_names = [idx for idx, val in edited["Delete"].items() if bool(val)]
 
-                # Horizontal row: toggle (wide) + button (narrow)
-                col_del1, col_del2 = st.columns([7, 3])  # make left side wider so text stays horizontal
+                # Controls stay inside the same card and fill width
+                col_del1, col_del2 = st.columns([7, 3])
                 with col_del1:
                     confirm_del = st.toggle("Confirm delete", value=False)
                 with col_del2:
-                    st.write("")  # spacer
                     delete_click = st.button(
                         "Delete selected upload(s)",
                         type="primary",
                         use_container_width=True,
                         disabled=(len(to_delete_saved_names) == 0 or not confirm_del),
                     )
+
+                st.markdown('</div>', unsafe_allow_html=True)
 
                 if delete_click:
                     try:
