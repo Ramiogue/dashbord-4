@@ -1,11 +1,13 @@
 # app.py — Merchant Dashboard
 # - Login by Device Serial (from Secrets)
-# - Admin uploads 1..N CSVs (replace OR append/merge with dedupe) or sets DATA_MASTER_URL
+# - Admin uploads 1..N CSVs -> APPEND/MERGE into master with dedupe
+# - Every uploaded file is saved under data/uploads/ and rows get __source_file__ column
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
 # - BUGFIX: approved_mask uses .str.startswith("00")
+# - Hide Streamlit header/toolbar for a cleaner top area
 
-import os, math
+import os, re, math, datetime as dt
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -43,22 +45,40 @@ def section_title(txt):
     return f"""<div class="section-title"><h2>{txt}</h2></div>"""
 
 # =========================
-# Global CSS
+# Global CSS (incl. hide Streamlit header/toolbar)
 # =========================
 st.markdown(f"""
 <style>
+/* App background + container width/padding */
 .stApp {{ background:{GREY_50}; }}
-.block-container {{ padding-top:.8rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
+.block-container {{ padding-top:.4rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
+
+/* Hide Streamlit chrome (top bar / header / menu / footer) */
+header[data-testid="stHeader"] {{ display:none; }}
+div[data-testid="stToolbar"] {{ display:none; }}
+#MainMenu {{ visibility:hidden; }}
+footer {{ visibility:hidden; }}
+
+/* Header row with logo + title */
 .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
 .header-logo img {{ height:48px; width:auto; border-radius:6px; }}
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
+
+/* Section title with green underline */
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
 .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
-.card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px; padding:12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
-.kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY}; border-radius:12px; padding:10px 12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); height:84px; display:flex; flex-direction:column; gap:2px; }}
+
+/* Cards & KPIs */
+.card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px;
+        padding:12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
+.kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY};
+            border-radius:12px; padding:10px 12px; box-shadow:0 1px 2px rgba(2,6,23,0.04);
+            height:84px; display:flex; flex-direction:column; gap:2px; }}
 .kpi-title {{ font-size:.72rem; color:{GREY_400}; margin:0; }}
 .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
 .kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
+
+/* Sidebar look */
 [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
 [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
 [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
@@ -66,6 +86,7 @@ st.markdown(f"""
 [data-testid="stSidebar"] details[open] > summary.streamlit-expanderHeader {{
   background:{FILTER_HDR_BG_OPEN} !important; color:#fff !important; border-bottom:1px solid {GREY_200} !important; }}
 [data-testid="stSidebar"] details[open] .streamlit-expanderContent {{ background:{FILTER_CNT_BG_OPEN} !important; padding:8px 12px !important; }}
+
 .soft-divider {{ height:10px; border-radius:999px; background:{GREY_100}; border:1px solid {GREY_200}; margin:6px 0 16px 0; }}
 </style>
 """, unsafe_allow_html=True)
@@ -122,27 +143,21 @@ if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
 
 # =========================
-# ADMIN data management (multi-file, replace OR append/merge)
+# ADMIN data management (append/merge only, save uploaded files)
+# (Hidden completely for merchants)
 # =========================
 MASTER_LOCAL_PATH = "data/master_transactions.csv"
+UPLOAD_DIR = "data/uploads"
+UPLOAD_LOG = "data/upload_log.csv"
 
-with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
-    st.caption("Admin can publish/replace the **master CSV** used for all users.")
-    if is_admin:
+if is_admin:
+    with st.sidebar.expander("Admin: Data Management", expanded=True):
+        st.caption("Upload CSVs to **append/merge** into the master. Each file is saved and rows get a `__source_file__` column.")
         admin_uploads = st.file_uploader(
-            "Upload one or more CSV files",
-            type=["csv"],
-            accept_multiple_files=True,
-            key="admin_master_multi",
+            "Upload one or more CSV files (they will be appended to the master)",
+            type=["csv"], accept_multiple_files=True, key="admin_master_multi",
         )
 
-        mode = st.radio(
-            "When publishing…",
-            ["Replace existing master with these", "Append/merge with existing master"],
-            index=0,
-        )
-
-        # Columns often good for de-duplication; only existing columns are used
         DEDUP_CANDIDATES = [
             "Device Serial", "Transaction Date", "Request Amount", "Settle Amount",
             "Auth Code", "System Trace Audit Number", "Online Reference Number",
@@ -152,36 +167,63 @@ with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
 
         colA, colB = st.columns([1,1])
         with colA:
-            if st.button("Publish master CSV", use_container_width=True, type="primary", disabled=not admin_uploads):
+            if st.button("Append & publish master CSV", use_container_width=True, type="primary", disabled=not admin_uploads):
                 try:
-                    import pandas as _pd
-                    # Read all uploaded files
-                    new_dfs = []
-                    for f in admin_uploads:
-                        df_i = _pd.read_csv(f)
-                        new_dfs.append(df_i)
-                    df_new = _pd.concat(new_dfs, ignore_index=True)
+                    os.makedirs("data", exist_ok=True)
+                    os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-                    # Append to existing if requested
-                    if mode == "Append/merge with existing master" and os.path.exists(MASTER_LOCAL_PATH):
-                        df_base = _pd.read_csv(MASTER_LOCAL_PATH)
-                        df_out = _pd.concat([df_base, df_new], ignore_index=True)
-                    else:
-                        df_out = df_new
+                    # Base/master df (may be empty first time)
+                    df_base = pd.read_csv(MASTER_LOCAL_PATH) if os.path.exists(MASTER_LOCAL_PATH) else pd.DataFrame()
+
+                    # Read, save, tag each new file
+                    new_parts, saved_names, orig_names, rows_counts = [], [], [], []
+                    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                    for f in admin_uploads:
+                        orig = f.name or "uploaded.csv"
+                        safe = re.sub(r'[^A-Za-z0-9._-]+', '_', orig)
+                        dest = os.path.join(UPLOAD_DIR, f"{ts}_{safe}")
+                        with open(dest, "wb") as out:
+                            out.write(f.getbuffer())
+                        saved_names.append(os.path.basename(dest))
+                        orig_names.append(orig)
+
+                        df_i = pd.read_csv(dest)
+                        df_i["__source_file__"] = orig  # keep original uploaded name
+                        new_parts.append(df_i)
+                        rows_counts.append(len(df_i))
+
+                    df_new = pd.concat(new_parts, ignore_index=True) if new_parts else pd.DataFrame()
+                    df_out = pd.concat([df_base, df_new], ignore_index=True)
 
                     # Optional de-dup
-                    if do_dedup:
+                    if do_dedup and not df_out.empty:
                         subset = [c for c in DEDUP_CANDIDATES if c in df_out.columns]
                         if subset:
                             df_out = df_out.drop_duplicates(subset=subset, keep="last")
                         else:
                             df_out = df_out.drop_duplicates(keep="last")
 
-                    os.makedirs("data", exist_ok=True)
                     df_out.to_csv(MASTER_LOCAL_PATH, index=False)
-                    st.success(f"Published master CSV with {len(df_out):,} rows.")
+
+                    # Update upload log
+                    log_rows = pd.DataFrame({
+                        "timestamp": [ts]*len(saved_names),
+                        "saved_name": saved_names,
+                        "original_name": orig_names,
+                        "rows_in_file": rows_counts,
+                    })
+                    if os.path.exists(UPLOAD_LOG):
+                        old = pd.read_csv(UPLOAD_LOG)
+                        log_rows = pd.concat([old, log_rows], ignore_index=True)
+                    log_rows.to_csv(UPLOAD_LOG, index=False)
+
+                    st.success(f"Appended {sum(rows_counts):,} rows from {len(saved_names)} file(s).")
+                    st.write("Saved files:")
+                    for nm in saved_names:
+                        st.write(f"- `{nm}`")
                 except Exception as e:
-                    st.error(f"Failed to publish: {e}")
+                    st.error(f"Failed to append/publish: {e}")
+
         with colB:
             if st.button("Remove local master CSV", use_container_width=True):
                 try:
@@ -192,8 +234,15 @@ with st.sidebar.expander("Admin: Data Management", expanded=is_admin):
                         st.info("No local master CSV found.")
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
-    else:
-        st.info("You are not an admin. Data is loaded by the admin.")
+
+        # Show upload log
+        if os.path.exists(UPLOAD_LOG):
+            st.caption("Recent uploads:")
+            try:
+                log_df = pd.read_csv(UPLOAD_LOG).sort_values(["timestamp","saved_name"], ascending=[False, True]).head(50)
+                st.dataframe(log_df, use_container_width=True, height=220)
+            except Exception:
+                pass
 
 # =========================
 # Load master data (URL → local file → error)
@@ -274,7 +323,6 @@ if f0.empty:
 # Flags
 # =========================
 def approved_mask(df):
-    # FIX: use .str.startswith for a Series
     dr = df["Decline Reason"].astype(str).str.strip()
     auth = df["Auth Code"].astype(str).str.strip()
     return dr.str.startswith("00") | auth.ne("")
@@ -457,7 +505,7 @@ show_cols = [
     "Decline Reason","Auth Code","Issuing Bank","BIN","Product Type",
     "Terminal ID","Device Serial","Date Payment Extract",
     "System Batch Number","Device Batch Number","System Trace Audit Number",
-    "Retrieval Reference","UTI","Online Reference Number",
+    "Retrieval Reference","UTI","Online Reference Number","__source_file__"
 ]
 existing_cols = [c for c in show_cols if c in f.columns]
 tbl = f[existing_cols].sort_values("Transaction Date", ascending=False).reset_index(drop=True)
