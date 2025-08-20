@@ -1,13 +1,13 @@
 # app.py — Merchant Dashboard
 # - Login by Device Serial (from Secrets)
 # - Admin uploads 1..N CSVs -> APPEND/MERGE into master with dedupe
-# - Each upload is saved under data/uploads/; rows are tagged with __source_file__
+# - Each upload is saved under data/uploads/ (kept as original filename; overwrite on same-name)
+# - Rows are tagged with __source_file__ (original upload name)
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
 # - Hide Streamlit header/toolbar
-# - Admin upload log lists ALL uploads as: Original file | Rows | Uploaded at | Saved file (no timestamp prefix in display)
+# - Upload Log shows: Original file | Rows | Uploaded at | Saved file (+ Delete column after Saved file)
 # - BUGFIX: approved_mask uses .str.startswith("00")
-# - NEW: Delete uploads directly in Upload Log table via a Delete column
 
 import os, re, math, datetime as dt
 import numpy as np
@@ -53,7 +53,7 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Global CSS (also hide Streamlit header/toolbar)
+# Global CSS (hide Streamlit chrome + keep controls on one line)
 # =========================
 st.markdown(f"""
 <style>
@@ -65,6 +65,9 @@ header[data-testid="stHeader"] {{ display:none; }}
 div[data-testid="stToolbar"] {{ display:none; }}
 #MainMenu {{ visibility:hidden; }}
 footer {{ visibility:hidden; }}
+
+/* Keep buttons from wrapping text onto multiple lines */
+.stButton > button {{ white-space: nowrap; }}
 
 /* Header row with logo + title */
 .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
@@ -107,6 +110,12 @@ MERCHANT_ID_COL = st.secrets.get("merchant_id_col", "Merchant Number - Business 
 LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")
 ADMIN_USERS     = set(st.secrets.get("admin_users", []))
 DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()
+
+# Upload behavior controls
+# - Keep original filename in uploads (no timestamp)
+# - Overwrite same-name file if it already exists
+UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # default False per your request
+UPLOAD_OVERWRITE        = bool(st.secrets.get("UPLOAD_OVERWRITE", True))           # default True per your request
 
 # Build credentials for streamlit_authenticator
 creds = {"usernames": {}}
@@ -190,14 +199,29 @@ if is_admin:
                     for f in admin_uploads:
                         orig = f.name or "uploaded.csv"
                         safe = re.sub(r'[^A-Za-z0-9._-]+', '_', orig)
-                        dest = os.path.join(UPLOAD_DIR, f"{ts}_{safe}")
-                        with open(dest, "wb") as out:
+
+                        # Decide destination filename
+                        dest_name = f"{ts}_{safe}" if UPLOAD_TIMESTAMP_PREFIX else safe
+                        dest_path = os.path.join(UPLOAD_DIR, dest_name)
+
+                        # Handle collisions based on overwrite policy
+                        if os.path.exists(dest_path) and not UPLOAD_OVERWRITE:
+                            base, ext = os.path.splitext(safe)
+                            k = 2
+                            while os.path.exists(os.path.join(UPLOAD_DIR, f"{base}({k}){ext}")):
+                                k += 1
+                            dest_name = f"{base}({k}){ext}"
+                            dest_path = os.path.join(UPLOAD_DIR, dest_name)
+
+                        # Save (overwrite if same-name and policy allows)
+                        with open(dest_path, "wb") as out:
                             out.write(f.getbuffer())
-                        saved_names.append(os.path.basename(dest))
+
+                        saved_names.append(dest_name)
                         orig_names.append(orig)
 
-                        df_i = pd.read_csv(dest)
-                        df_i["__source_file__"] = orig  # track original upload name
+                        df_i = pd.read_csv(dest_path)
+                        df_i["__source_file__"] = orig  # track original upload name as given by user
                         new_parts.append(df_i)
                         rows_counts.append(len(df_i))
 
@@ -214,7 +238,7 @@ if is_admin:
 
                     df_out.to_csv(MASTER_LOCAL_PATH, index=False)
 
-                    # Update/upload log
+                    # Update upload log (store both timestamp and human time)
                     log_rows = pd.DataFrame({
                         "timestamp": [ts]*len(saved_names),
                         "uploaded_at": [uploaded_at]*len(saved_names),
@@ -255,10 +279,9 @@ if is_admin:
                         except Exception: return ""
                     log_df["uploaded_at"] = log_df["timestamp"].apply(ts_to_human)
 
-                # Display-friendly saved file (strip leading timestamp_)
+                # Remove leading timestamp_ in display (works whether or not we use timestamps)
                 def strip_ts_prefix(name): return re.sub(r'^\d{8}-\d{6}_', '', str(name))
 
-                # Build display frame and keep saved_name as the index (so we can map back)
                 display = log_df.copy()
                 display["Saved file"] = display["saved_name"].apply(strip_ts_prefix)
                 display = display.rename(columns={
@@ -273,10 +296,9 @@ if is_admin:
                 elif "timestamp" in display.columns:
                     display = display.sort_values("timestamp", ascending=False)
 
-                # Set index to saved_name for reliable identity
+                # Use saved_name as index to reliably know which file to delete
                 display = display.set_index("saved_name", drop=False)
 
-                # Only show these columns in the editor (and add Delete after Saved file)
                 editor_view = display[["Original file", "Rows", "Uploaded at", "Saved file"]].copy()
                 editor_view["Delete"] = False
 
@@ -288,70 +310,78 @@ if is_admin:
                     height=320,
                     hide_index=True,
                     num_rows="fixed",
-                    disabled=["Original file", "Rows", "Uploaded at", "Saved file"],  # keep table read-only except Delete
+                    disabled=["Original file", "Rows", "Uploaded at", "Saved file"],
                     column_config={
                         "Rows": st.column_config.NumberColumn("Rows", format="%d"),
-                        "Uploaded at": st.column_config.DatetimeColumn("Uploaded at", format="YYYY-MM-DD HH:mm:ss"),
+                        "Uploaded at": st.column_config.TextColumn("Uploaded at"),
                         "Delete": st.column_config.CheckboxColumn("Delete", help="Check to remove this upload"),
                     },
                 )
 
-                # Which saved_name(s) are marked for deletion?
+                # Collect which saved_name(s) are marked for deletion
                 to_delete_saved_names = [idx for idx, val in edited["Delete"].items() if bool(val)]
 
-                col_del1, col_del2 = st.columns([1, 5])
+                # Horizontal row: toggle (wide) + button (narrow)
+                col_del1, col_del2 = st.columns([7, 3])  # make left side wider so text stays horizontal
                 with col_del1:
-                    confirm_del = st.checkbox("Confirm delete")
+                    confirm_del = st.toggle("Confirm delete", value=False)
                 with col_del2:
-                    if st.button("Delete selected upload(s)", type="primary", disabled=(len(to_delete_saved_names)==0 or not confirm_del)):
-                        try:
-                            # Remove files
-                            removed = 0
-                            for s in to_delete_saved_names:
-                                path = os.path.join(UPLOAD_DIR, str(s))
-                                if os.path.exists(path):
-                                    os.remove(path)
-                                    removed += 1
+                    st.write("")  # spacer
+                    delete_click = st.button(
+                        "Delete selected upload(s)",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=(len(to_delete_saved_names) == 0 or not confirm_del),
+                    )
 
-                            # Update log
-                            new_log = log_df[~log_df["saved_name"].isin(to_delete_saved_names)].copy()
-                            new_log.to_csv(UPLOAD_LOG, index=False)
+                if delete_click:
+                    try:
+                        # Remove files
+                        removed = 0
+                        for s in to_delete_saved_names:
+                            p = os.path.join(UPLOAD_DIR, str(s))
+                            if os.path.exists(p):
+                                os.remove(p)
+                                removed += 1
 
-                            # Rebuild master from remaining uploads
-                            parts = []
-                            if not new_log.empty:
-                                for _, r in new_log.iterrows():
-                                    sname = str(r.get("saved_name","")).strip()
-                                    fpath = os.path.join(UPLOAD_DIR, sname)
-                                    if os.path.exists(fpath):
-                                        try:
-                                            df_i = pd.read_csv(fpath)
-                                            # tag source
-                                            orig = r.get("original_name") or strip_ts_prefix(os.path.basename(fpath))
-                                            df_i["__source_file__"] = orig
-                                            parts.append(df_i)
-                                        except Exception as e:
-                                            st.warning(f"Skipped rebuilding from '{sname}': {e}")
+                        # Update log
+                        new_log = log_df[~log_df["saved_name"].isin(to_delete_saved_names)].copy()
+                        new_log.to_csv(UPLOAD_LOG, index=False)
 
-                            if len(parts) == 0:
-                                if os.path.exists(MASTER_LOCAL_PATH):
-                                    os.remove(MASTER_LOCAL_PATH)
-                                st.success(f"Deleted {removed} upload(s). No uploads remain, so the master CSV was removed.")
+                        # Rebuild master from remaining uploads
+                        parts = []
+                        if not new_log.empty:
+                            for _, r in new_log.iterrows():
+                                sname = str(r.get("saved_name","")).strip()
+                                fpath = os.path.join(UPLOAD_DIR, sname)
+                                if os.path.exists(fpath):
+                                    try:
+                                        df_i = pd.read_csv(fpath)
+                                        orig = r.get("original_name") or strip_ts_prefix(os.path.basename(fpath))
+                                        df_i["__source_file__"] = orig
+                                        parts.append(df_i)
+                                    except Exception as e:
+                                        st.warning(f"Skipped rebuilding from '{sname}': {e}")
+
+                        if len(parts) == 0:
+                            if os.path.exists(MASTER_LOCAL_PATH):
+                                os.remove(MASTER_LOCAL_PATH)
+                            st.success(f"Deleted {removed} upload(s). No uploads remain, so the master CSV was removed.")
+                        else:
+                            rebuilt = pd.concat(parts, ignore_index=True)
+                            subset = [c for c in ["Device Serial","Transaction Date","Request Amount","Settle Amount",
+                                                  "Auth Code","System Trace Audit Number","Online Reference Number",
+                                                  "Retrieval Reference","UTI"] if c in rebuilt.columns]
+                            if subset:
+                                rebuilt = rebuilt.drop_duplicates(subset=subset, keep="last")
                             else:
-                                rebuilt = pd.concat(parts, ignore_index=True)
-                                subset = [c for c in ["Device Serial","Transaction Date","Request Amount","Settle Amount",
-                                                      "Auth Code","System Trace Audit Number","Online Reference Number",
-                                                      "Retrieval Reference","UTI"] if c in rebuilt.columns]
-                                if subset:
-                                    rebuilt = rebuilt.drop_duplicates(subset=subset, keep="last")
-                                else:
-                                    rebuilt = rebuilt.drop_duplicates(keep="last")
-                                rebuilt.to_csv(MASTER_LOCAL_PATH, index=False)
-                                st.success(f"Deleted {removed} upload(s) and rebuilt master from {len(parts)} remaining file(s).")
+                                rebuilt = rebuilt.drop_duplicates(keep="last")
+                            rebuilt.to_csv(MASTER_LOCAL_PATH, index=False)
+                            st.success(f"Deleted {removed} upload(s) and rebuilt master from {len(parts)} remaining file(s).")
 
-                            safe_rerun()
-                        except Exception as e:
-                            st.error(f"Delete failed: {e}")
+                        safe_rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
 
             except Exception as e:
                 st.warning(f"Could not render upload log: {e}")
