@@ -6,9 +6,9 @@
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
 # - Hide Streamlit header/toolbar
-# - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete (Delete column appears after Saved file)
-# - Sidebar toggle button (since the Streamlit header is hidden)
-# - Buttons fill and wrap inside their boxes
+# - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete
+# - Top-left ☰ hamburger to toggle sidebar (works for everyone)
+# - Buttons fill/wrap; action strips styled as grey boxes with white text
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
 import os, re, math, datetime as dt
@@ -56,7 +56,7 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Global CSS (hide chrome + make buttons fill/wrap within their boxes)
+# Global CSS
 # =========================
 st.markdown(f"""
 <style>
@@ -69,21 +69,18 @@ div[data-testid="stToolbar"] {{ display:none; }}
 #MainMenu {{ visibility:hidden; }}
 footer {{ visibility:hidden; }}
 
-/* Buttons: fill width and wrap text so they move with their container */
+/* Buttons fill/wrap */
 .stButton > button, .stDownloadButton > button {{
   width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
 }}
 
-/* Header row with logo + title + sidebar toggle */
-.header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
+/* Header pieces */
 .header-logo img {{ height:48px; width:auto; border-radius:6px; }}
-.title-left {{ flex:1 1 auto; }}
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
-.header-actions {{ flex:0 0 auto; min-width:160px; }}
 
-/* Section title with green underline */
+/* Section title underline */
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
 .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
 
@@ -97,18 +94,15 @@ footer {{ visibility:hidden; }}
 .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
 .kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
 
-/* Dark action box (grey with white text) used for in-line action strips */
+/* Grey action strip (white text) */
 .action-card {{
   background:{GREY_700}; color:#fff; border-radius:12px; padding:12px;
   border:1px solid {GREY_300}; box-shadow:0 1px 2px rgba(2,6,23,0.06); margin:10px 0;
 }}
-.action-card .stToggle {{ color:#fff; }}
 .action-card label, .action-card p, .action-card span, .action-card div {{ color:#fff !important; }}
-.action-card .stButton > button {{
-  background:#ffffff; color:{TEXT};
-}}
+.action-card .stButton > button {{ background:#ffffff; color:{TEXT}; }}
 
-/* Sidebar look */
+/* Sidebar style */
 [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
 [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
 [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
@@ -131,9 +125,9 @@ LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")
 ADMIN_USERS     = set(st.secrets.get("admin_users", []))
 DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()
 
-# Upload behavior controls (override via Secrets if you ever want timestamps or no-overwrite)
-UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # default False: keep original filename
-UPLOAD_OVERWRITE        = bool(st.secrets.get("UPLOAD_OVERWRITE", True))           # default True: overwrite same-name
+# Upload behavior controls
+UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # keep False to keep original names
+UPLOAD_OVERWRITE        = bool(st.secrets.get("UPLOAD_OVERWRITE", True))           # True = overwrite same-name
 
 # Build credentials for streamlit_authenticator
 creds = {"usernames": {}}
@@ -177,16 +171,29 @@ if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
 
 # =========================
-# Sidebar toggle (since Streamlit header is hidden)
+# Sidebar toggle state (works for all users)
 # =========================
 if "sidebar_open" not in st.session_state:
     st.session_state.sidebar_open = True
 
-# Apply visibility via CSS
+# Apply visibility each run
 st.markdown(
     f"<style>[data-testid='stSidebar']{{display:{'block' if st.session_state.sidebar_open else 'none'};}}</style>",
     unsafe_allow_html=True,
 )
+
+# =========================
+# Header (with top-left ☰)
+# =========================
+c0, c1, c2 = st.columns([0.07, 0.09, 1], gap="small")
+with c0:
+    if st.button("☰", key="toggle_sidebar_btn", help="Toggle sidebar", use_container_width=True):
+        st.session_state.sidebar_open = not st.session_state.sidebar_open
+        safe_rerun()
+with c1:
+    st.markdown(f'<div class="header-logo"><img src="{LOGO_URL}" alt="Logo"></div>', unsafe_allow_html=True)
+with c2:
+    st.markdown('<div class="title-left"><h1>Merchant Dashboard</h1></div>', unsafe_allow_html=True)
 
 # =========================
 # ADMIN data management
@@ -243,7 +250,7 @@ if is_admin:
                             dest_name = f"{base}({k}){ext}"
                             dest_path = os.path.join(UPLOAD_DIR, dest_name)
 
-                        # Save file (overwrite if allowed)
+                        # Save (overwrite if allowed)
                         with open(dest_path, "wb") as out:
                             out.write(f.getbuffer())
 
@@ -297,7 +304,7 @@ if is_admin:
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
 
-        # ===== Upload Log with in-table Delete (table + controls inside one action card) =====
+        # ===== Upload Log with in-table Delete =====
         if os.path.exists(UPLOAD_LOG):
             try:
                 log_df = pd.read_csv(UPLOAD_LOG)
@@ -309,7 +316,7 @@ if is_admin:
                         except Exception: return ""
                     log_df["uploaded_at"] = log_df["timestamp"].apply(ts_to_human)
 
-                # Strip leading timestamp_ in display (works whether or not timestamps are used)
+                # Display-friendly saved file (strip leading timestamp_)
                 def strip_ts_prefix(name): return re.sub(r'^\d{8}-\d{6}_', '', str(name))
 
                 display = log_df.copy()
@@ -326,16 +333,16 @@ if is_admin:
                 elif "timestamp" in display.columns:
                     display = display.sort_values("timestamp", ascending=False)
 
-                # Use saved_name as index to reliably identify rows
+                # Index by saved_name for identity
                 display = display.set_index("saved_name", drop=False)
 
-                # Show only the four columns + a Delete checkbox column
+                # Show four columns + Delete checkbox
                 editor_view = display[["Original file", "Rows", "Uploaded at", "Saved file"]].copy()
                 editor_view["Delete"] = False
 
                 st.markdown(section_title("Upload Log"), unsafe_allow_html=True)
 
-                # Upload log table (in a card)
+                # Table card
                 st.markdown('<div class="card">', unsafe_allow_html=True)
                 edited = st.data_editor(
                     editor_view,
@@ -356,7 +363,7 @@ if is_admin:
                 # Which saved_name(s) are marked for deletion?
                 to_delete_saved_names = [idx for idx, val in edited["Delete"].items() if bool(val)]
 
-                # Action strip below the table with proper styling
+                # Action strip (grey box with white text)
                 st.markdown('<div class="action-card">', unsafe_allow_html=True)
                 col_del1, col_del2 = st.columns([7, 3])
                 with col_del1:
@@ -473,30 +480,6 @@ for c in ["Product Type","Issuing Bank","Decline Reason","Terminal ID","Device S
     tx[c] = tx[c].fillna("").astype(str)
 
 # =========================
-# Header with Sidebar toggle
-# =========================
-st.markdown(f'''
-<div class="header-row">
-  <div class="header-logo"><img src="{LOGO_URL}" alt="Spaza Eats Logo"></div>
-  <div class="title-left"><h1>Merchant Dashboard</h1></div>
-  <div class="header-actions">
-</div>
-''', unsafe_allow_html=True)
-
-# Place the toggle button under the header (aligned right)
-col_gap, col_btn = st.columns([6,1])
-with col_gap:
-    pass
-with col_btn:
-    if st.button("☰ Sidebar", use_container_width=True):
-        st.session_state.sidebar_open = not st.session_state.sidebar_open
-        # apply immediately
-        st.markdown(
-            f"<style>[data-testid='stSidebar']{{display:{'block' if st.session_state.sidebar_open else 'none'};}}</style>",
-            unsafe_allow_html=True,
-        )
-
-# =========================
 # Choose scope (admin) or enforce device (merchant)
 # =========================
 login_value = None if is_admin else (user_rec.get("device_serial") or user_rec.get("merchant_id"))
@@ -578,7 +561,7 @@ settled_cnt  = int(settled_rows.sum())
 aov          = safe_div(revenue, settled_cnt)
 
 # =========================
-# Header caption
+# Caption under header
 # =========================
 src_path = f"URL:{DATA_MASTER_URL}" if DATA_MASTER_URL else (f"file:{MASTER_LOCAL_PATH}" if os.path.exists(MASTER_LOCAL_PATH) else "—")
 st.caption(f"{LOGIN_KEY_COL}: **{effective_label}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
