@@ -1,11 +1,12 @@
-# app.py — Merchant Dashboard (CSV + Excel)
+# app.py — Merchant Dashboard (Excel-only uploads)
 # - Login by Device Serial (from Secrets)
-# - Admin uploads 1..N CSV/Excel -> APPEND/MERGE into master with dedupe
+# - Admin uploads 1..N Excel files -> APPEND/MERGE into master CSV with optional dedupe
 # - Each upload is saved under data/uploads/ (keeps original name by default)
 # - Rows are tagged with __source_file__ (original upload name)
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
 # - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete
+# - Only Excel is accepted (.xlsx/.xlsm/.xls/.xlsb). Master is stored as CSV.
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
 import os, re, math, datetime as dt
@@ -53,10 +54,9 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Excel/CSV readers + header cleaner
-# (EXCEL_SHEET can be set in Secrets to a sheet name or index)
+# Excel readers + header cleaner
 # =========================
-EXCEL_SHEET = st.secrets.get("EXCEL_SHEET", 0)
+EXCEL_SHEET = st.secrets.get("EXCEL_SHEET", 0)  # sheet name or index
 
 def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = (
@@ -66,30 +66,20 @@ def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df
 
-def read_table_any(path_or_buf):
+def read_excel_file(path_or_buf):
     """
-    Read CSV/TSV/semicolon or Excel (.xlsx/.xlsm/.xlsb/.xls).
-    For CSV-like, auto-detect delimiter. For Excel, use EXCEL_SHEET.
+    Read Excel only: .xlsx/.xlsm (openpyxl), .xls (xlrd), .xlsb (pyxlsb).
     """
     s = str(path_or_buf).lower()
-    try:
-        if s.endswith((".xlsx", ".xlsm", ".xlsb", ".xls")):
-            # Excel engines
-            if s.endswith(".xls"):
-                return pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="xlrd")
-            elif s.endswith(".xlsb"):
-                return pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="pyxlsb")
-            else:
-                return pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="openpyxl")
-        else:
-            # CSV/TSV/semicolon: detect sep automatically
-            return pd.read_csv(path_or_buf, sep=None, engine="python")
-    except ImportError:
-        st.error(
-            "Reading Excel requires extra packages. Add to requirements.txt:\n"
-            "openpyxl (xlsx/xlsm). Add xlrd for legacy .xls and pyxlsb for .xlsb."
-        )
-        raise
+    if s.endswith(".xlsx") or s.endswith(".xlsm"):
+        df = pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="openpyxl")
+    elif s.endswith(".xls"):
+        df = pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="xlrd")
+    elif s.endswith(".xlsb"):
+        df = pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="pyxlsb")
+    else:
+        raise ValueError("Only Excel files (.xlsx, .xlsm, .xls, .xlsb) are supported.")
+    return clean_cols(df)
 
 # =========================
 # Global CSS
@@ -150,7 +140,6 @@ cookie_key = st.secrets.get("COOKIE_KEY", "change-me")
 MERCHANT_ID_COL = st.secrets.get("merchant_id_col", "Merchant Number - Business Name")
 LOGIN_KEY_COL   = st.secrets.get("login_key_col", "Device Serial")
 ADMIN_USERS     = set(st.secrets.get("admin_users", []))
-DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()
 
 # Upload behavior controls
 UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # False = keep original names
@@ -209,15 +198,15 @@ st.markdown(f'''
 # =========================
 # ADMIN data management
 # =========================
-MASTER_LOCAL_PATH = "data/master_transactions.csv"
+MASTER_LOCAL_PATH = "data/master_transactions.csv"   # master stays as CSV on disk
 UPLOAD_DIR = "data/uploads"
 UPLOAD_LOG = "data/upload_log.csv"
 
 if is_admin:
     with st.sidebar.expander("Admin: Data Management", expanded=True):
         admin_uploads = st.file_uploader(
-            "Upload one or more files (CSV or Excel) — they will be appended to the master",
-            type=["csv","xlsx","xls","xlsm","xlsb"],
+            "Upload one or more Excel files — they will be appended to the master",
+            type=["xlsx","xls","xlsm","xlsb"],
             accept_multiple_files=True, key="admin_master_multi",
         )
 
@@ -235,8 +224,7 @@ if is_admin:
                     os.makedirs("data", exist_ok=True)
                     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-                    df_base = read_table_any(MASTER_LOCAL_PATH) if os.path.exists(MASTER_LOCAL_PATH) else pd.DataFrame()
-                    if not df_base.empty: df_base = clean_cols(df_base)
+                    df_base = pd.read_csv(MASTER_LOCAL_PATH) if os.path.exists(MASTER_LOCAL_PATH) else pd.DataFrame()
 
                     new_parts, saved_names, orig_names, rows_counts = [], [], [], []
                     now = dt.datetime.now()
@@ -244,7 +232,7 @@ if is_admin:
                     uploaded_at = now.strftime("%Y-%m-%d %H:%M:%S")
 
                     for f in admin_uploads:
-                        orig = f.name or "uploaded"
+                        orig = f.name or "uploaded.xlsx"
                         safe = re.sub(r'[^A-Za-z0-9._-]+', '_', orig)
                         dest_name = f"{ts}_{safe}" if UPLOAD_TIMESTAMP_PREFIX else safe
                         dest_path = os.path.join(UPLOAD_DIR, dest_name)
@@ -260,8 +248,7 @@ if is_admin:
 
                         saved_names.append(dest_name); orig_names.append(orig)
 
-                        df_i = read_table_any(dest_path)
-                        df_i = clean_cols(df_i)
+                        df_i = read_excel_file(dest_path)
                         df_i["__source_file__"] = orig
                         new_parts.append(df_i)
                         rows_counts.append(len(df_i))
@@ -303,7 +290,7 @@ if is_admin:
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
 
-        # ===== Upload Log with deletion =====
+        # ===== Upload Log with deletion & rebuild =====
         if os.path.exists(UPLOAD_LOG):
             try:
                 log_df = pd.read_csv(UPLOAD_LOG)
@@ -330,7 +317,6 @@ if is_admin:
                     display = display.sort_values("timestamp", ascending=False)
 
                 display = display.set_index("saved_name", drop=False)
-
                 editor_view = display[["Original file","Rows","Uploaded at","Saved file"]].copy()
                 editor_view["Delete"] = False
 
@@ -350,7 +336,6 @@ if is_admin:
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
 
-                # names marked for deletion (index is saved_name)
                 to_delete_saved_names = edited.index[edited["Delete"] == True].tolist()
 
                 st.markdown('<div class="action-card">', unsafe_allow_html=True)
@@ -386,8 +371,7 @@ if is_admin:
                                 fpath = os.path.join(UPLOAD_DIR, sname)
                                 if os.path.exists(fpath):
                                     try:
-                                        df_i = read_table_any(fpath)
-                                        df_i = clean_cols(df_i)
+                                        df_i = read_excel_file(fpath)
                                         orig = r.get("original_name") or strip_ts_prefix(os.path.basename(fpath))
                                         df_i["__source_file__"] = orig
                                         parts.append(df_i)
@@ -415,40 +399,22 @@ if is_admin:
                 st.warning(f"Could not render upload log: {e}")
 
 # =========================
-# Load master data (URL → local → error)
+# Load master data (local CSV only)
 # =========================
-def load_master_from_url(url: str):
-    df = read_table_any(url)
-    df = clean_cols(df)
-    df["__path__"] = "remote:master"
-    return df
-
 def load_master_from_local(path: str):
     if os.path.exists(path):
-        df = read_table_any(path)
-        df = clean_cols(df)
+        df = pd.read_csv(path)
         df["__path__"] = path
         return df
     return None
 
-tx = None
-if DATA_MASTER_URL:
-    try:
-        tx = load_master_from_url(DATA_MASTER_URL)
-    except Exception as e:
-        st.warning(f"Could not load DATA_MASTER_URL: {e}")
-
-if tx is None:
-    tx = load_master_from_local(MASTER_LOCAL_PATH)
-
+tx = load_master_from_local(MASTER_LOCAL_PATH)
 if tx is None:
     if is_admin:
-        st.error("No master data found. Upload files in the Admin panel, or set DATA_MASTER_URL in Secrets.")
+        st.error("No master data found. Upload Excel file(s) in the Admin panel.")
     else:
         st.error("Data not available yet. Please contact the admin.")
     st.stop()
-
-tx = clean_cols(tx)
 
 # =========================
 # Validate & prep data
@@ -553,7 +519,7 @@ aov          = safe_div(revenue, settled_cnt)
 # =========================
 # Caption under header
 # =========================
-src_path = f"URL:{DATA_MASTER_URL}" if DATA_MASTER_URL else (f"file:{MASTER_LOCAL_PATH}" if os.path.exists(MASTER_LOCAL_PATH) else "—")
+src_path = f"file:{MASTER_LOCAL_PATH}" if os.path.exists(MASTER_LOCAL_PATH) else "—"
 st.caption(f"{LOGIN_KEY_COL}: **{effective_label}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
 
 def kpi_card(title, value, sub=""):
