@@ -5,9 +5,8 @@
 # - Rows are tagged with __source_file__ (original upload name)
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
-# - Hide Streamlit header/toolbar
+# - Streamlit default header visible (native ☰ controls the sidebar)
 # - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete
-# - Top-left ☰ hamburger to toggle sidebar (works for everyone)
 # - Buttons fill/wrap; action strips styled as grey boxes with white text
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
@@ -56,18 +55,12 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Global CSS
+# Global CSS  (header is visible; only styling below)
 # =========================
 st.markdown(f"""
 <style>
 .stApp {{ background:{GREY_50}; }}
 .block-container {{ padding-top:.4rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
-
-/* Hide Streamlit chrome */
-header[data-testid="stHeader"] {{ display:none; }}
-div[data-testid="stToolbar"] {{ display:none; }}
-#MainMenu {{ visibility:hidden; }}
-footer {{ visibility:hidden; }}
 
 /* Buttons fill/wrap */
 .stButton > button, .stDownloadButton > button {{
@@ -76,11 +69,12 @@ footer {{ visibility:hidden; }}
   overflow-wrap: anywhere;
 }}
 
-/* Header pieces */
+/* Header row with logo + title (content header under the Streamlit header) */
+.header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
 .header-logo img {{ height:48px; width:auto; border-radius:6px; }}
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
 
-/* Section title underline */
+/* Section title with green underline */
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
 .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
 
@@ -102,7 +96,7 @@ footer {{ visibility:hidden; }}
 .action-card label, .action-card p, .action-card span, .action-card div {{ color:#fff !important; }}
 .action-card .stButton > button {{ background:#ffffff; color:{TEXT}; }}
 
-/* Sidebar style */
+/* Sidebar look */
 [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
 [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
 [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
@@ -171,29 +165,14 @@ if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
 
 # =========================
-# Sidebar toggle state (works for all users)
+# Header (content header under Streamlit's own header)
 # =========================
-if "sidebar_open" not in st.session_state:
-    st.session_state.sidebar_open = True
-
-# Apply visibility each run
-st.markdown(
-    f"<style>[data-testid='stSidebar']{{display:{'block' if st.session_state.sidebar_open else 'none'};}}</style>",
-    unsafe_allow_html=True,
-)
-
-# =========================
-# Header (with top-left ☰)
-# =========================
-c0, c1, c2 = st.columns([0.07, 0.09, 1], gap="small")
-with c0:
-    if st.button("☰", key="toggle_sidebar_btn", help="Toggle sidebar", use_container_width=True):
-        st.session_state.sidebar_open = not st.session_state.sidebar_open
-        safe_rerun()
-with c1:
-    st.markdown(f'<div class="header-logo"><img src="{LOGO_URL}" alt="Logo"></div>', unsafe_allow_html=True)
-with c2:
-    st.markdown('<div class="title-left"><h1>Merchant Dashboard</h1></div>', unsafe_allow_html=True)
+st.markdown(f'''
+<div class="header-row">
+  <div class="header-logo"><img src="{LOGO_URL}" alt="Spaza Eats Logo"></div>
+  <div class="title-left"><h1>Merchant Dashboard</h1></div>
+</div>
+''', unsafe_allow_html=True)
 
 # =========================
 # ADMIN data management
@@ -333,7 +312,7 @@ if is_admin:
                 elif "timestamp" in display.columns:
                     display = display.sort_values("timestamp", ascending=False)
 
-                # Index by saved_name for identity
+                # Index by saved_name
                 display = display.set_index("saved_name", drop=False)
 
                 # Show four columns + Delete checkbox
@@ -692,7 +671,7 @@ for col in ["Request Amount","Settle Amount"]:
         tbl[col] = tbl[col].apply(lambda v: f"R {v:,.2f}" if pd.notnull(v) else "")
 st.dataframe(tbl, use_container_width=True, height=520)
 
-raw_for_download = f[existing_cols].sort_values("Transaction Date", ascending=False).reset_index(drop=True)
+raw_for_download = f[existing_cols].sort_values("Transaction Date", descending=False).reset_index(drop=True)
 st.download_button("Download filtered transactions (CSV)",
                    data=raw_for_download.to_csv(index=False).encode("utf-8"),
                    file_name="filtered_transactions.csv", mime="text/csv")
