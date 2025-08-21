@@ -1,13 +1,11 @@
-# app.py — Merchant Dashboard
+# app.py — Merchant Dashboard (CSV + Excel)
 # - Login by Device Serial (from Secrets)
-# - Admin uploads 1..N CSVs -> APPEND/MERGE into master with dedupe
-# - Each upload is saved under data/uploads/ as the ORIGINAL filename (overwrite on same-name)
+# - Admin uploads 1..N CSV/Excel -> APPEND/MERGE into master with dedupe
+# - Each upload is saved under data/uploads/ (keeps original name by default)
 # - Rows are tagged with __source_file__ (original upload name)
 # - Admin can view all merchants or choose a device
 # - Merchants see only their own device
-# - Streamlit default header visible (native ☰ controls the sidebar)
 # - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete
-# - Buttons fill/wrap and share the same style
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
 import os, re, math, datetime as dt
@@ -55,35 +53,67 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Global CSS  (header visible; unify button styles)
+# Excel/CSV readers + header cleaner
+# (EXCEL_SHEET can be set in Secrets to a sheet name or index)
+# =========================
+EXCEL_SHEET = st.secrets.get("EXCEL_SHEET", 0)
+
+def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = (
+        df.columns.astype(str)
+                  .str.replace('\ufeff','', regex=False)  # remove BOM
+                  .str.strip()
+    )
+    return df
+
+def read_table_any(path_or_buf):
+    """
+    Read CSV/TSV/semicolon or Excel (.xlsx/.xlsm/.xlsb/.xls).
+    For CSV-like, auto-detect delimiter. For Excel, use EXCEL_SHEET.
+    """
+    s = str(path_or_buf).lower()
+    try:
+        if s.endswith((".xlsx", ".xlsm", ".xlsb", ".xls")):
+            # Excel engines
+            if s.endswith(".xls"):
+                return pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="xlrd")
+            elif s.endswith(".xlsb"):
+                return pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="pyxlsb")
+            else:
+                return pd.read_excel(path_or_buf, sheet_name=EXCEL_SHEET, engine="openpyxl")
+        else:
+            # CSV/TSV/semicolon: detect sep automatically
+            return pd.read_csv(path_or_buf, sep=None, engine="python")
+    except ImportError:
+        st.error(
+            "Reading Excel requires extra packages. Add to requirements.txt:\n"
+            "openpyxl (xlsx/xlsm). Add xlrd for legacy .xls and pyxlsb for .xlsb."
+        )
+        raise
+
+# =========================
+# Global CSS
 # =========================
 st.markdown(f"""
 <style>
 .stApp {{ background:{GREY_50}; }}
 .block-container {{ padding-top:.4rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
 
-/* All buttons: full-width, wrapped, same look as "Remove local master CSV" */
+/* Buttons: full-width, wrapped */
 .stButton > button, .stDownloadButton > button {{
-  width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  background: #ffffff;
-  color: {TEXT};
-  border: 1px solid {GREY_200};
-  border-radius: 12px;
+  width: 100%; white-space: normal; overflow-wrap: anywhere;
+  background: #ffffff; color: {TEXT};
+  border: 1px solid {GREY_200}; border-radius: 12px;
   box-shadow: 0 1px 2px rgba(2,6,23,0.04);
 }}
 
-/* Header row under the Streamlit header */
 .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
 .header-logo img {{ height:48px; width:auto; border-radius:6px; }}
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
 
-/* Section title underline */
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
 .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
 
-/* Cards & KPIs */
 .card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-radius:12px;
         padding:12px; box-shadow:0 1px 2px rgba(2,6,23,0.04); margin-bottom:10px; }}
 .kpi-card {{ background:{CARD_BG}; border:1px solid {GREY_200}; border-left:4px solid {PRIMARY};
@@ -93,7 +123,6 @@ st.markdown(f"""
 .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
 .kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
 
-/* Grey action strip (white text) */
 .action-card {{
   background:{GREY_700}; color:#fff; border-radius:12px; padding:12px;
   border:1px solid {GREY_300}; box-shadow:0 1px 2px rgba(2,6,23,0.06); margin:10px 0;
@@ -101,7 +130,6 @@ st.markdown(f"""
 .action-card label, .action-card p, .action-card span, .action-card div {{ color:#fff !important; }}
 .action-card .stButton > button {{ background:#ffffff; color:{TEXT}; }}
 
-/* Sidebar look */
 [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
 [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
 [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
@@ -125,10 +153,10 @@ ADMIN_USERS     = set(st.secrets.get("admin_users", []))
 DATA_MASTER_URL = st.secrets.get("DATA_MASTER_URL", "").strip()
 
 # Upload behavior controls
-UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # keep False to keep original names
+UPLOAD_TIMESTAMP_PREFIX = bool(st.secrets.get("UPLOAD_TIMESTAMP_PREFIX", False))   # False = keep original names
 UPLOAD_OVERWRITE        = bool(st.secrets.get("UPLOAD_OVERWRITE", True))           # True = overwrite same-name
 
-# Build credentials for streamlit_authenticator
+# Build credentials
 creds = {"usernames": {}}
 for uname, u in users_cfg.items():
     creds["usernames"][uname] = {"name": u.get("name", uname),
@@ -146,8 +174,7 @@ with st.container():
     st.markdown('</div>', unsafe_allow_html=True)
 
 auth_status = st.session_state.get("authentication_status")
-name = st.session_state.get("name")
-username = st.session_state.get("username")
+name = st.session_state.get("name"); username = st.session_state.get("username")
 
 if auth_status is False:
     st.error("Invalid credentials"); st.stop()
@@ -170,7 +197,7 @@ if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
 
 # =========================
-# Header (content header under Streamlit's own header)
+# Header under Streamlit header
 # =========================
 st.markdown(f'''
 <div class="header-row">
@@ -189,84 +216,71 @@ UPLOAD_LOG = "data/upload_log.csv"
 if is_admin:
     with st.sidebar.expander("Admin: Data Management", expanded=True):
         admin_uploads = st.file_uploader(
-            "Upload one or more CSV files (they will be appended to the master)",
-            type=["csv"], accept_multiple_files=True, key="admin_master_multi",
+            "Upload one or more files (CSV or Excel) — they will be appended to the master",
+            type=["csv","xlsx","xls","xlsm","xlsb"],
+            accept_multiple_files=True, key="admin_master_multi",
         )
 
-        # De-dup columns; only existing ones will be used
         DEDUP_CANDIDATES = [
-            "Device Serial", "Transaction Date", "Request Amount", "Settle Amount",
-            "Auth Code", "System Trace Audit Number", "Online Reference Number",
-            "Retrieval Reference", "UTI"
+            "Device Serial","Transaction Date","Request Amount","Settle Amount",
+            "Auth Code","System Trace Audit Number","Online Reference Number",
+            "Retrieval Reference","UTI"
         ]
         do_dedup = st.checkbox("Deduplicate after combine", value=True)
 
         colA, colB = st.columns([1,1])
         with colA:
-            # SAME STYLE as "Remove local master CSV" (no type="primary")
             if st.button("Append & publish master CSV", use_container_width=True, disabled=not admin_uploads):
                 try:
                     os.makedirs("data", exist_ok=True)
                     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-                    # Base/master df (may be empty first time)
-                    df_base = pd.read_csv(MASTER_LOCAL_PATH) if os.path.exists(MASTER_LOCAL_PATH) else pd.DataFrame()
+                    df_base = read_table_any(MASTER_LOCAL_PATH) if os.path.exists(MASTER_LOCAL_PATH) else pd.DataFrame()
+                    if not df_base.empty: df_base = clean_cols(df_base)
 
-                    # Read, save, tag each new file
                     new_parts, saved_names, orig_names, rows_counts = [], [], [], []
                     now = dt.datetime.now()
                     ts = now.strftime("%Y%m%d-%H%M%S")
                     uploaded_at = now.strftime("%Y-%m-%d %H:%M:%S")
 
                     for f in admin_uploads:
-                        orig = f.name or "uploaded.csv"
+                        orig = f.name or "uploaded"
                         safe = re.sub(r'[^A-Za-z0-9._-]+', '_', orig)
-
-                        # Decide destination filename
                         dest_name = f"{ts}_{safe}" if UPLOAD_TIMESTAMP_PREFIX else safe
                         dest_path = os.path.join(UPLOAD_DIR, dest_name)
 
-                        # Handle collisions based on overwrite policy
                         if os.path.exists(dest_path) and not UPLOAD_OVERWRITE:
-                            base, ext = os.path.splitext(safe)
-                            k = 2
-                            while os.path.exists(os.path.join(UPLOAD_DIR, f"{base}({k}){ext}")):
-                                k += 1
+                            base, ext = os.path.splitext(safe); k = 2
+                            while os.path.exists(os.path.join(UPLOAD_DIR, f"{base}({k}){ext}")): k += 1
                             dest_name = f"{base}({k}){ext}"
                             dest_path = os.path.join(UPLOAD_DIR, dest_name)
 
-                        # Save (overwrite if allowed)
                         with open(dest_path, "wb") as out:
                             out.write(f.getbuffer())
 
-                        saved_names.append(dest_name)
-                        orig_names.append(orig)
+                        saved_names.append(dest_name); orig_names.append(orig)
 
-                        df_i = pd.read_csv(dest_path)
-                        df_i["__source_file__"] = orig  # track original upload name
+                        df_i = read_table_any(dest_path)
+                        df_i = clean_cols(df_i)
+                        df_i["__source_file__"] = orig
                         new_parts.append(df_i)
                         rows_counts.append(len(df_i))
 
                     df_new = pd.concat(new_parts, ignore_index=True) if new_parts else pd.DataFrame()
                     df_out = pd.concat([df_base, df_new], ignore_index=True)
 
-                    # Optional de-dup
                     if do_dedup and not df_out.empty:
                         subset = [c for c in DEDUP_CANDIDATES if c in df_out.columns]
-                        if subset:
-                            df_out = df_out.drop_duplicates(subset=subset, keep="last")
-                        else:
-                            df_out = df_out.drop_duplicates(keep="last")
+                        df_out = df_out.drop_duplicates(subset=subset, keep="last") if subset else df_out.drop_duplicates(keep="last")
 
                     df_out.to_csv(MASTER_LOCAL_PATH, index=False)
 
-                    # Update upload log
                     log_rows = pd.DataFrame({
-                        "timestamp": [ts]*len(saved_names),
-                        "uploaded_at": [uploaded_at]*len(saved_names),
-                        "original_name": orig_names,
-                        "rows_in_file": rows_counts,
-                        "saved_name": saved_names,
+                        "timestamp":[ts]*len(saved_names),
+                        "uploaded_at":[uploaded_at]*len(saved_names),
+                        "original_name":orig_names,
+                        "rows_in_file":rows_counts,
+                        "saved_name":saved_names,
                     })
                     if os.path.exists(UPLOAD_LOG):
                         old = pd.read_csv(UPLOAD_LOG)
@@ -279,7 +293,6 @@ if is_admin:
                     st.error(f"Failed to append/publish: {e}")
 
         with colB:
-            # This already has the look you like; leave as default
             if st.button("Remove local master CSV", use_container_width=True):
                 try:
                     if os.path.exists(MASTER_LOCAL_PATH):
@@ -290,54 +303,45 @@ if is_admin:
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
 
-        # ===== Upload Log with in-table Delete =====
+        # ===== Upload Log with deletion =====
         if os.path.exists(UPLOAD_LOG):
             try:
                 log_df = pd.read_csv(UPLOAD_LOG)
 
-                # Backfill uploaded_at if missing (older entries)
                 if "uploaded_at" not in log_df.columns and "timestamp" in log_df.columns:
                     def ts_to_human(x):
                         try: return dt.datetime.strptime(str(x), "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
                         except Exception: return ""
                     log_df["uploaded_at"] = log_df["timestamp"].apply(ts_to_human)
 
-                # Display-friendly saved file (strip leading timestamp_)
                 def strip_ts_prefix(name): return re.sub(r'^\d{8}-\d{6}_', '', str(name))
 
                 display = log_df.copy()
                 display["Saved file"] = display["saved_name"].apply(strip_ts_prefix)
                 display = display.rename(columns={
-                    "original_name": "Original file",
-                    "rows_in_file": "Rows",
-                    "uploaded_at": "Uploaded at",
+                    "original_name":"Original file",
+                    "rows_in_file":"Rows",
+                    "uploaded_at":"Uploaded at",
                 })
 
-                # Sort newest first
                 if "Uploaded at" in display.columns and display["Uploaded at"].notna().any():
                     display = display.sort_values("Uploaded at", ascending=False)
                 elif "timestamp" in display.columns:
                     display = display.sort_values("timestamp", ascending=False)
 
-                # Index by saved_name
                 display = display.set_index("saved_name", drop=False)
 
-                # Show four columns + Delete checkbox
-                editor_view = display[["Original file", "Rows", "Uploaded at", "Saved file"]].copy()
+                editor_view = display[["Original file","Rows","Uploaded at","Saved file"]].copy()
                 editor_view["Delete"] = False
 
                 st.markdown(section_title("Upload Log"), unsafe_allow_html=True)
-
-                # Table card
                 st.markdown('<div class="card">', unsafe_allow_html=True)
                 edited = st.data_editor(
                     editor_view,
                     key="upload_log_editor",
-                    use_container_width=True,
-                    height=340,
-                    hide_index=True,
-                    num_rows="fixed",
-                    disabled=["Original file", "Rows", "Uploaded at", "Saved file"],
+                    use_container_width=True, height=340,
+                    hide_index=True, num_rows="fixed",
+                    disabled=["Original file","Rows","Uploaded at","Saved file"],
                     column_config={
                         "Rows": st.column_config.NumberColumn("Rows", format="%d"),
                         "Uploaded at": st.column_config.TextColumn("Uploaded at"),
@@ -346,16 +350,14 @@ if is_admin:
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
 
-                # Which saved_name(s) are marked for deletion?
-                to_delete_saved_names = [idx for idx, val in edited["Delete"].items() if bool(val)]
+                # names marked for deletion (index is saved_name)
+                to_delete_saved_names = edited.index[edited["Delete"] == True].tolist()
 
-                # Action strip (grey box with white text)
                 st.markdown('<div class="action-card">', unsafe_allow_html=True)
-                col_del1, col_del2 = st.columns([7, 3])
+                col_del1, col_del2 = st.columns([7,3])
                 with col_del1:
                     confirm_del = st.toggle("Confirm delete", value=False)
                 with col_del2:
-                    # SAME STYLE as "Remove local master CSV" (no type="primary")
                     delete_click = st.button(
                         "Delete selected upload(s)",
                         use_container_width=True,
@@ -365,19 +367,18 @@ if is_admin:
 
                 if delete_click:
                     try:
-                        # Remove files
+                        # remove files
                         removed = 0
-                        for s in to_delete_saved_names:
-                            p = os.path.join(UPLOAD_DIR, str(s))
+                        for sname in to_delete_saved_names:
+                            p = os.path.join(UPLOAD_DIR, str(sname))
                             if os.path.exists(p):
-                                os.remove(p)
-                                removed += 1
+                                os.remove(p); removed += 1
 
-                        # Update log
+                        # update log
                         new_log = log_df[~log_df["saved_name"].isin(to_delete_saved_names)].copy()
                         new_log.to_csv(UPLOAD_LOG, index=False)
 
-                        # Rebuild master from remaining uploads
+                        # rebuild master from remaining uploads
                         parts = []
                         if not new_log.empty:
                             for _, r in new_log.iterrows():
@@ -385,7 +386,8 @@ if is_admin:
                                 fpath = os.path.join(UPLOAD_DIR, sname)
                                 if os.path.exists(fpath):
                                     try:
-                                        df_i = pd.read_csv(fpath)
+                                        df_i = read_table_any(fpath)
+                                        df_i = clean_cols(df_i)
                                         orig = r.get("original_name") or strip_ts_prefix(os.path.basename(fpath))
                                         df_i["__source_file__"] = orig
                                         parts.append(df_i)
@@ -401,10 +403,7 @@ if is_admin:
                             subset = [c for c in ["Device Serial","Transaction Date","Request Amount","Settle Amount",
                                                   "Auth Code","System Trace Audit Number","Online Reference Number",
                                                   "Retrieval Reference","UTI"] if c in rebuilt.columns]
-                            if subset:
-                                rebuilt = rebuilt.drop_duplicates(subset=subset, keep="last")
-                            else:
-                                rebuilt = rebuilt.drop_duplicates(keep="last")
+                            rebuilt = rebuilt.drop_duplicates(subset=subset, keep="last") if subset else rebuilt.drop_duplicates(keep="last")
                             rebuilt.to_csv(MASTER_LOCAL_PATH, index=False)
                             st.success(f"Deleted {removed} upload(s) and rebuilt master from {len(parts)} remaining file(s).")
 
@@ -416,16 +415,20 @@ if is_admin:
                 st.warning(f"Could not render upload log: {e}")
 
 # =========================
-# Load master data (URL → local file → error)
+# Load master data (URL → local → error)
 # =========================
 def load_master_from_url(url: str):
-    df = pd.read_csv(url)
+    df = read_table_any(url)
+    df = clean_cols(df)
     df["__path__"] = "remote:master"
     return df
 
 def load_master_from_local(path: str):
     if os.path.exists(path):
-        df = pd.read_csv(path); df["__path__"] = path; return df
+        df = read_table_any(path)
+        df = clean_cols(df)
+        df["__path__"] = path
+        return df
     return None
 
 tx = None
@@ -440,10 +443,12 @@ if tx is None:
 
 if tx is None:
     if is_admin:
-        st.error("No master data found. Upload CSV(s) in the Admin panel, or set DATA_MASTER_URL in Secrets.")
+        st.error("No master data found. Upload files in the Admin panel, or set DATA_MASTER_URL in Secrets.")
     else:
         st.error("Data not available yet. Please contact the admin.")
     st.stop()
+
+tx = clean_cols(tx)
 
 # =========================
 # Validate & prep data
@@ -474,8 +479,7 @@ if is_admin:
     with st.sidebar.expander("Admin view", expanded=True):
         admin_scope = st.radio("Scope", ["All merchants", "Choose device"], index=1)
         if admin_scope == "All merchants":
-            f0 = tx.copy()
-            effective_label = "All merchants"
+            f0 = tx.copy(); effective_label = "All merchants"
         else:
             devices = sorted(d for d in tx[LOGIN_KEY_COL].astype(str).str.strip().unique() if d and d.lower() != "nan")
             selected = st.selectbox("Device Serial", devices)
