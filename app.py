@@ -7,7 +7,7 @@
 # - Merchants see only their own device
 # - Streamlit default header visible (native ☰ controls the sidebar)
 # - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete
-# - Buttons fill/wrap; action strips styled as grey boxes with white text
+# - Buttons fill/wrap and share the same style
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
 import os, re, math, datetime as dt
@@ -55,26 +55,31 @@ def safe_rerun():
         except Exception: pass
 
 # =========================
-# Global CSS  (header is visible; only styling below)
+# Global CSS  (header visible; unify button styles)
 # =========================
 st.markdown(f"""
 <style>
 .stApp {{ background:{GREY_50}; }}
 .block-container {{ padding-top:.4rem; padding-bottom:1.2rem; max-width:1320px; margin:0 auto; }}
 
-/* Buttons fill/wrap */
+/* All buttons: full-width, wrapped, same look as "Remove local master CSV" */
 .stButton > button, .stDownloadButton > button {{
   width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
+  background: #ffffff;
+  color: {TEXT};
+  border: 1px solid {GREY_200};
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(2,6,23,0.04);
 }}
 
-/* Header row with logo + title (content header under the Streamlit header) */
+/* Header row under the Streamlit header */
 .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
 .header-logo img {{ height:48px; width:auto; border-radius:6px; }}
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
 
-/* Section title with green underline */
+/* Section title underline */
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
 .section-title h2:after {{ content:""; position:absolute; left:0; bottom:0; height:3px; width:64px; background:{PRIMARY}; border-radius:3px; }}
 
@@ -198,7 +203,8 @@ if is_admin:
 
         colA, colB = st.columns([1,1])
         with colA:
-            if st.button("Append & publish master CSV", use_container_width=True, type="primary", disabled=not admin_uploads):
+            # SAME STYLE as "Remove local master CSV" (no type="primary")
+            if st.button("Append & publish master CSV", use_container_width=True, disabled=not admin_uploads):
                 try:
                     os.makedirs("data", exist_ok=True)
                     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -273,6 +279,7 @@ if is_admin:
                     st.error(f"Failed to append/publish: {e}")
 
         with colB:
+            # This already has the look you like; leave as default
             if st.button("Remove local master CSV", use_container_width=True):
                 try:
                     if os.path.exists(MASTER_LOCAL_PATH):
@@ -348,9 +355,9 @@ if is_admin:
                 with col_del1:
                     confirm_del = st.toggle("Confirm delete", value=False)
                 with col_del2:
+                    # SAME STYLE as "Remove local master CSV" (no type="primary")
                     delete_click = st.button(
                         "Delete selected upload(s)",
-                        type="primary",
                         use_container_width=True,
                         disabled=(len(to_delete_saved_names) == 0 or not confirm_del),
                     )
@@ -671,7 +678,7 @@ for col in ["Request Amount","Settle Amount"]:
         tbl[col] = tbl[col].apply(lambda v: f"R {v:,.2f}" if pd.notnull(v) else "")
 st.dataframe(tbl, use_container_width=True, height=520)
 
-raw_for_download = f[existing_cols].sort_values("Transaction Date", descending=False).reset_index(drop=True)
+raw_for_download = f[existing_cols].sort_values("Transaction Date", ascending=True).reset_index(drop=True)
 st.download_button("Download filtered transactions (CSV)",
                    data=raw_for_download.to_csv(index=False).encode("utf-8"),
                    file_name="filtered_transactions.csv", mime="text/csv")
