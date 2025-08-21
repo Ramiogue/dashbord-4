@@ -7,6 +7,8 @@
 # - Merchants see only their own device
 # - Hide Streamlit header/toolbar
 # - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete (Delete column appears after Saved file)
+# - Sidebar toggle button (since the Streamlit header is hidden)
+# - Buttons fill and wrap inside their boxes
 # - BUGFIX: approved_mask uses .str.startswith("00")
 
 import os, re, math, datetime as dt
@@ -26,6 +28,7 @@ st.set_page_config(page_title="Merchant Dashboard", page_icon=None, layout="wide
 # =========================
 PRIMARY = "#0B6E4F"; GREEN_2 = "#149E67"; TEXT = "#0f172a"; CARD_BG = "#ffffff"
 GREY_50 = "#f8fafc"; GREY_100 = "#f1f5f9"; GREY_200 = "#e2e8f0"; GREY_300 = "#cbd5e1"; GREY_400 = "#94a3b8"
+GREY_700 = "#334155"
 SIDEBAR_BG = "#eef2f6"; FILTER_HDR_BG_DEF = PRIMARY; FILTER_HDR_BG_OPEN = GREEN_2; FILTER_CNT_BG_OPEN = "#e8f5ef"
 DANGER = "#dc2626"; NEUTRALS = ["#334155","#475569","#64748b","#94a3b8","#cbd5e1","#e2e8f0"]
 LOGO_URL = "https://admin.spazaeats.co.za/public/assets/img/logo.png"
@@ -73,10 +76,12 @@ footer {{ visibility:hidden; }}
   overflow-wrap: anywhere;
 }}
 
-/* Header row with logo + title */
+/* Header row with logo + title + sidebar toggle */
 .header-row {{ display:flex; align-items:center; gap:12px; margin-bottom:.25rem; }}
 .header-logo img {{ height:48px; width:auto; border-radius:6px; }}
+.title-left {{ flex:1 1 auto; }}
 .title-left h1 {{ font-size:1.8rem; font-weight:800; margin:0; color:{TEXT}; letter-spacing:.2px; }}
+.header-actions {{ flex:0 0 auto; min-width:160px; }}
 
 /* Section title with green underline */
 .section-title h2 {{ font-size:1.3rem; margin:12px 0 6px 0; color:{TEXT}; position:relative; padding-bottom:8px; }}
@@ -92,7 +97,18 @@ footer {{ visibility:hidden; }}
 .kpi-value {{ font-size:1.25rem; font-weight:800; color:{TEXT}; margin:0; }}
 .kpi-sub {{ font-size:.75rem; color:{GREY_400}; margin:0; }}
 
-/* Sidebar */
+/* Dark action box (grey with white text) used for in-line action strips */
+.action-card {{
+  background:{GREY_700}; color:#fff; border-radius:12px; padding:12px;
+  border:1px solid {GREY_300}; box-shadow:0 1px 2px rgba(2,6,23,0.06); margin:10px 0;
+}}
+.action-card .stToggle {{ color:#fff; }}
+.action-card label, .action-card p, .action-card span, .action-card div {{ color:#fff !important; }}
+.action-card .stButton > button {{
+  background:#ffffff; color:{TEXT};
+}}
+
+/* Sidebar look */
 [data-testid="stSidebar"] {{ background:{SIDEBAR_BG}; box-shadow:inset -1px 0 0 {GREY_200}; }}
 [data-testid="stSidebar"] details {{ border:1px solid {GREY_200}; border-radius:12px; overflow:hidden; }}
 [data-testid="stSidebar"] details > summary.streamlit-expanderHeader {{
@@ -159,6 +175,18 @@ def get_user_record(cfg: dict, uname: str):
 user_rec = get_user_record(users_cfg, username)
 if not user_rec and not is_admin:
     st.error("User not found in secrets."); st.stop()
+
+# =========================
+# Sidebar toggle (since Streamlit header is hidden)
+# =========================
+if "sidebar_open" not in st.session_state:
+    st.session_state.sidebar_open = True
+
+# Apply visibility via CSS
+st.markdown(
+    f"<style>[data-testid='stSidebar']{{display:{'block' if st.session_state.sidebar_open else 'none'};}}</style>",
+    unsafe_allow_html=True,
+)
 
 # =========================
 # ADMIN data management
@@ -269,7 +297,7 @@ if is_admin:
                 except Exception as e:
                     st.error(f"Failed to remove: {e}")
 
-        # ===== Upload Log with in-table Delete (table + controls inside one card) =====
+        # ===== Upload Log with in-table Delete (table + controls inside one action card) =====
         if os.path.exists(UPLOAD_LOG):
             try:
                 log_df = pd.read_csv(UPLOAD_LOG)
@@ -306,8 +334,9 @@ if is_admin:
                 editor_view["Delete"] = False
 
                 st.markdown(section_title("Upload Log"), unsafe_allow_html=True)
-                st.markdown('<div class="card">', unsafe_allow_html=True)
 
+                # Upload log table (in a card)
+                st.markdown('<div class="card">', unsafe_allow_html=True)
                 edited = st.data_editor(
                     editor_view,
                     key="upload_log_editor",
@@ -322,11 +351,13 @@ if is_admin:
                         "Delete": st.column_config.CheckboxColumn("Delete", help="Check to remove this upload"),
                     },
                 )
+                st.markdown('</div>', unsafe_allow_html=True)
 
                 # Which saved_name(s) are marked for deletion?
                 to_delete_saved_names = [idx for idx, val in edited["Delete"].items() if bool(val)]
 
-                # Controls stay inside the same card and fill width
+                # Action strip below the table with proper styling
+                st.markdown('<div class="action-card">', unsafe_allow_html=True)
                 col_del1, col_del2 = st.columns([7, 3])
                 with col_del1:
                     confirm_del = st.toggle("Confirm delete", value=False)
@@ -337,7 +368,6 @@ if is_admin:
                         use_container_width=True,
                         disabled=(len(to_delete_saved_names) == 0 or not confirm_del),
                     )
-
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 if delete_click:
@@ -443,6 +473,30 @@ for c in ["Product Type","Issuing Bank","Decline Reason","Terminal ID","Device S
     tx[c] = tx[c].fillna("").astype(str)
 
 # =========================
+# Header with Sidebar toggle
+# =========================
+st.markdown(f'''
+<div class="header-row">
+  <div class="header-logo"><img src="{LOGO_URL}" alt="Spaza Eats Logo"></div>
+  <div class="title-left"><h1>Merchant Dashboard</h1></div>
+  <div class="header-actions">
+</div>
+''', unsafe_allow_html=True)
+
+# Place the toggle button under the header (aligned right)
+col_gap, col_btn = st.columns([6,1])
+with col_gap:
+    pass
+with col_btn:
+    if st.button("☰ Sidebar", use_container_width=True):
+        st.session_state.sidebar_open = not st.session_state.sidebar_open
+        # apply immediately
+        st.markdown(
+            f"<style>[data-testid='stSidebar']{{display:{'block' if st.session_state.sidebar_open else 'none'};}}</style>",
+            unsafe_allow_html=True,
+        )
+
+# =========================
 # Choose scope (admin) or enforce device (merchant)
 # =========================
 login_value = None if is_admin else (user_rec.get("device_serial") or user_rec.get("merchant_id"))
@@ -524,15 +578,8 @@ settled_cnt  = int(settled_rows.sum())
 aov          = safe_div(revenue, settled_cnt)
 
 # =========================
-# Header
+# Header caption
 # =========================
-st.markdown(f'''
-<div class="header-row">
-  <div class="header-logo"><img src="{LOGO_URL}" alt="Spaza Eats Logo"></div>
-  <div class="title-left"><h1>Merchant Dashboard</h1></div>
-</div>
-''', unsafe_allow_html=True)
-
 src_path = f"URL:{DATA_MASTER_URL}" if DATA_MASTER_URL else (f"file:{MASTER_LOCAL_PATH}" if os.path.exists(MASTER_LOCAL_PATH) else "—")
 st.caption(f"{LOGIN_KEY_COL}: **{effective_label}**  •  Source: `{src_path}`  •  Date: {start_date} → {end_date}")
 
