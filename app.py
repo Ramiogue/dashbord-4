@@ -8,6 +8,8 @@
 # - Upload Log: Original file | Rows | Uploaded at | Saved file | Delete
 # - Only Excel is accepted (.xlsx/.xlsm/.xls/.xlsb). Master is stored as CSV.
 # - BUGFIX: approved_mask uses .str.startswith("00")
+# - CHANGE: Revenue/AOV only when Transaction Paid == "Yes"
+# - CHANGE: Replace "Top Decline Reasons" with Payment Outcomes donut (Paid vs Not Paid)
 
 import os, re, math, datetime as dt
 import numpy as np
@@ -422,7 +424,8 @@ if tx is None:
 required_cols = {
     LOGIN_KEY_COL, "Transaction Date","Request Amount","Settle Amount",
     "Auth Code","Decline Reason","Date Payment Extract",
-    "Terminal ID","Device Serial","Product Type","Issuing Bank","BIN"
+    "Terminal ID","Device Serial","Product Type","Issuing Bank","BIN",
+    "Transaction Paid"  # <-- NEW: required field for paid logic
 }
 missing = sorted(required_cols - set(tx.columns))
 if missing:
@@ -433,6 +436,7 @@ tx["Transaction Date"] = pd.to_datetime(tx["Transaction Date"], errors="coerce")
 tx["Request Amount"]   = pd.to_numeric(tx["Request Amount"], errors="coerce")
 tx["Settle Amount"]    = pd.to_numeric(tx["Settle Amount"], errors="coerce")
 tx["Date Payment Extract"] = tx["Date Payment Extract"].fillna("").astype(str)
+tx["Transaction Paid"] = tx["Transaction Paid"].fillna("").astype(str)  # <-- normalize
 for c in ["Product Type","Issuing Bank","Decline Reason","Terminal ID","Device Serial","Auth Code"]:
     tx[c] = tx[c].fillna("").astype(str)
 
@@ -473,8 +477,13 @@ def settled_mask(df):
     nonzero = pd.to_numeric(df["Settle Amount"], errors="coerce").fillna(0).ne(0)
     return has_extract & nonzero
 
+def paid_mask(df):
+    # Ground-truth payment success
+    return df["Transaction Paid"].astype(str).str.strip().str.lower().eq("yes")
+
 f0["is_approved"] = approved_mask(f0)
-f0["is_settled"]  = settled_mask(f0)
+f0["is_settled"]  = settled_mask(f0)   # retained for reference (not used in revenue now)
+f0["is_paid"]     = paid_mask(f0)      # NEW: use for revenue/AOV and outcome chart
 
 # =========================
 # Sidebar filters
@@ -503,7 +512,7 @@ if f.empty:
     st.warning("No data for the selected filters."); st.stop()
 
 # =========================
-# KPIs
+# KPIs (Revenue/AOV from paid rows only)
 # =========================
 def safe_div(n, d): return (n / d) if d else np.nan
 transactions_cnt = int(len(f))
@@ -511,10 +520,12 @@ attempts_cnt  = int(len(f))
 approved_cnt  = int(f["is_approved"].sum())
 approval_rate = safe_div(approved_cnt, attempts_cnt)
 decline_rate  = safe_div(attempts_cnt - approved_cnt, attempts_cnt)
-settled_rows = f["is_settled"]
-revenue      = float(f.loc[settled_rows, "Settle Amount"].sum())
-settled_cnt  = int(settled_rows.sum())
-aov          = safe_div(revenue, settled_cnt)
+
+paid_rows = f["is_paid"]
+revenue   = float(f.loc[paid_rows, "Settle Amount"].sum())
+paid_cnt  = int(paid_rows.sum())
+aov       = safe_div(revenue, paid_cnt)
+paid_rate = safe_div(paid_cnt, attempts_cnt)
 
 # =========================
 # Caption under header
@@ -536,7 +547,7 @@ with cols[0]: kpi_card("# Transactions", f"{transactions_cnt:,}")
 with cols[1]: kpi_card("Total Requests", currency_fmt(f['Request Amount'].sum()))
 with cols[2]: kpi_card("Revenue", currency_fmt(revenue))
 with cols[3]: kpi_card("Approval Rate", f"{(approval_rate*100):.1f}%" if not math.isnan(approval_rate) else "—")
-with cols[4]: kpi_card("Decline Rate", f"{(decline_rate*100):.1f}%" if not math.isnan(decline_rate) else "—")
+with cols[4]: kpi_card("Paid Rate", f"{(paid_rate*100):.1f}%" if not math.isnan(paid_rate) else "—")
 with cols[5]: kpi_card("Average Order Value (AOV)", f"R {aov:,.2f}" if not math.isnan(aov) else "—")
 
 st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
@@ -547,7 +558,7 @@ st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
 st.markdown(section_title("Revenue per Month"), unsafe_allow_html=True)
 st.markdown('<div class="card">', unsafe_allow_html=True)
 df_month = (
-    f.loc[settled_rows, ["Transaction Date", "Settle Amount"]]
+    f.loc[paid_rows, ["Transaction Date", "Settle Amount"]]
       .assign(month_start=lambda d: pd.to_datetime(d["Transaction Date"]).dt.to_period("M").dt.to_timestamp())
       .groupby("month_start", as_index=False).agg(revenue=("Settle Amount", "sum")).sort_values("month_start")
 )
@@ -563,12 +574,12 @@ if not df_month.empty:
     apply_plotly_layout(fig_m)
     st.plotly_chart(fig_m, use_container_width=True)
 else:
-    st.info("No settled revenue in the selected period.")
+    st.info("No paid revenue in the selected period.")
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown(section_title("Product Type Mix (Pie)"), unsafe_allow_html=True)
 st.markdown('<div class="card">', unsafe_allow_html=True)
-prod_pie = f.loc[settled_rows, ["Product Type", "Settle Amount"]].copy()
+prod_pie = f.loc[paid_rows, ["Product Type", "Settle Amount"]].copy()
 if not prod_pie.empty:
     prod_pie = (prod_pie.groupby("Product Type", as_index=False)["Settle Amount"].sum()
                 .rename(columns={"Settle Amount":"revenue"}).sort_values("revenue", ascending=False))
@@ -577,18 +588,18 @@ if not prod_pie.empty:
                              texttemplate="%{label}<br>R %{value:,.0f}<br>%{percent:.0%}",
                              hovertemplate="%{label}<br>Revenue: R %{value:,.0f} (%{percent:.1%})<extra></extra>",
                              marker=dict(line=dict(color="#ffffff", width=1)))
-    fig_pie_pt.update_layout(title_text="Revenue by Product Type", colorway=NEUTRALS)
+    fig_pie_pt.update_layout(title_text="Revenue by Product Type (Paid Only)", colorway=NEUTRALS)
     apply_plotly_layout(fig_pie_pt)
     st.plotly_chart(fig_pie_pt, use_container_width=True)
 else:
-    st.info("No settled revenue in the selected period.")
+    st.info("No paid revenue in the selected period.")
 st.markdown('</div>', unsafe_allow_html=True)
 
 c1, c2 = st.columns((1.2, 1), gap="small")
 with c1:
     st.markdown(section_title("Top Issuing Banks by Revenue"), unsafe_allow_html=True)
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    issuer_df = (f.loc[settled_rows, ["Issuing Bank","Settle Amount"]]
+    issuer_df = (f.loc[paid_rows, ["Issuing Bank","Settle Amount"]]
                  .groupby("Issuing Bank", as_index=False).agg(revenue=("Settle Amount","sum"))
                  .sort_values("revenue", ascending=False).head(10))
     if not issuer_df.empty:
@@ -596,37 +607,43 @@ with c1:
         fig_bank.update_traces(marker_color=NEUTRALS[0], marker_line_color="#ffffff", marker_line_width=1)
         fig_bank.update_xaxes(title_text="Revenue (R)", tickprefix="R ", separatethousands=True)
         fig_bank.update_yaxes(title_text="")
-        fig_bank.update_layout(title_text="Top 10 Issuers (Revenue)")
+        fig_bank.update_layout(title_text="Top 10 Issuers (Revenue, Paid Only)")
         fig_bank.update_traces(hovertemplate="%{y}<br>Revenue: R %{x:,.0f}<extra></extra>")
         apply_plotly_layout(fig_bank)
         st.plotly_chart(fig_bank, use_container_width=True)
     else:
-        st.info("No revenue in range.")
+        st.info("No paid revenue in range.")
     st.markdown('</div>', unsafe_allow_html=True)
 
 with c2:
-    st.markdown(section_title("Top Decline Reasons"), unsafe_allow_html=True)
+    st.markdown(section_title("Payment Outcomes"), unsafe_allow_html=True)
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    base_attempts = int(len(f))
-    decl_df = (
-        f.loc[~f["is_approved"], "Decline Reason"]
-         .value_counts()
-         .rename_axis("Decline Reason")
-         .reset_index(name="count")
-         .sort_values("count", ascending=True)
+
+    # 2-slice donut: Paid vs Not Paid
+    outcome_df = (
+        f.assign(Outcome=np.where(f["is_paid"], "Paid (Yes)", "Not Paid (No)"))
+         .groupby("Outcome", as_index=False).size()
+         .rename(columns={"size": "count"})
+         .sort_values("count", ascending=False)
     )
-    if not decl_df.empty and base_attempts > 0:
-        decl_df["pct_of_attempts"] = decl_df["count"] / base_attempts
-        fig_decl = px.bar(decl_df, x="pct_of_attempts", y="Decline Reason", orientation="h")
-        fig_decl.update_traces(marker_color=DANGER, texttemplate="%{x:.0%}", textposition="outside")
-        fig_decl.update_xaxes(tickformat=".0%", range=[0, max(0.01, float(decl_df["pct_of_attempts"].max()) * 1.15)])
-        fig_decl.update_yaxes(title_text="")
-        fig_decl.update_layout(title_text="As % of All Attempts")
-        fig_decl.update_traces(hovertemplate="%{y}<br>% of Attempts: %{x:.1%}<extra></extra>")
-        apply_plotly_layout(fig_decl)
-        st.plotly_chart(fig_decl, use_container_width=True)
+
+    if not outcome_df.empty:
+        total_attempts = int(len(f))
+        outcome_df["pct"] = outcome_df["count"] / total_attempts
+
+        fig_out = px.pie(outcome_df, values="count", names="Outcome", hole=0.5)
+        fig_out.update_traces(
+            textposition="inside",
+            texttemplate="%{label}<br>%{value:,} (%{percent:.0%})",
+            hovertemplate="%{label}<br>Count: %{value:,} (%{percent:.1%})<extra></extra>",
+            marker=dict(line=dict(color="#ffffff", width=1))
+        )
+        fig_out.update_layout(title_text="Paid vs Not Paid (All Attempts)", colorway=NEUTRALS)
+        apply_plotly_layout(fig_out)
+        st.plotly_chart(fig_out, use_container_width=True)
     else:
-        st.info("No declines in the selected period.")
+        st.info("No transactions in the selected period.")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================
@@ -637,7 +654,7 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 show_cols = [
     "Transaction Date","Request Amount","Settle Amount",
     "Decline Reason","Auth Code","Issuing Bank","BIN","Product Type",
-    "Terminal ID","Device Serial","Date Payment Extract",
+    "Terminal ID","Device Serial","Date Payment Extract","Transaction Paid",
     "System Batch Number","Device Batch Number","System Trace Audit Number",
     "Retrieval Reference","UTI","Online Reference Number","__source_file__"
 ]
@@ -660,8 +677,9 @@ st.markdown('</div>', unsafe_allow_html=True)
 with st.expander("About the metrics"):
     st.write("""
 - **# Transactions**: all rows in the selected range.
-- **Approval Rate**: rows with approval (Decline Reason starts with `"00"` or Auth Code present) ÷ all rows.
-- **Revenue**: sum of **Settle Amount** where a settlement file exists (`Date Payment Extract` present) and amount ≠ 0.
-- **AOV**: Revenue ÷ # of settled rows.
+- **Approval Rate**: rows with authorization success (Decline Reason starts with `"00"` or Auth Code present) ÷ all rows.
+- **Revenue**: sum of **Settle Amount** where **Transaction Paid = "Yes"**.
+- **AOV**: Revenue ÷ # of **paid** rows.
+- **Paid Rate**: # of **paid** rows ÷ all rows.
 - **Total Requests**: Sum of **Request Amount** for all rows in the selected range.
 """)
